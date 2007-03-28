@@ -1,0 +1,26 @@
+<?php
+   
+   class FooBar
+   {
+      
+      var $a;
+      var $b = 10;
+      
+      var $c;
+      var $d;
+      var $e = 10;
+      var $f = 20;
+      
+      private $g;
+      private $h = 100;
+      private $i;
+      
+      public $j;
+      static $k;
+      protected $l;
+      
+      public static $n;
+      private static $m;
+   }
+   
+?>
