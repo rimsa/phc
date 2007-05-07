@@ -6,12 +6,1005 @@
  *
  * Currently, the C code is generated directly from the AST; once we have an
  * IR, the C code will be generated from the IR instead.
+ *
+ * We define a virtual class "Pattern" which corresponds to a particular kind
+ * of statement that we can generate code for. We inherit from Pattern to 
+ * define the various statements we can translate, create instances of each
+ * of these classes, and then for every statement in the input, cycle through
+ * all the patterns to find one that matches, and then call "generate_code"
+ * on that pattern.
+ *
+ * We rely on the Shredder, Lower_control_flow and Lower_expr_flow. In a few
+ * places, however, we still need a "new" temporary, but these temporaries all
+ * have in common that they are short-lived (we never need to call "fresh",
+ * for instance). Where we need these, we open a local C scope, and then just
+ * use a descriptive name; the life-span of the temporary then is limited to
+ * this scope. The equivalent of opening a local C scope when generating 
+ * assembly code instead would simply be a temporary value on the stack.
  */
 
 #include "Generate_C.h"
 #include "process_ast/XML_unparser.h"
 #include "lib/List.h"
 #include "process_ast/PHP_unparser.h"
+
+/*
+ * After the shredder, many expressions can only contain "simple" variables.
+ * For example, where a bin-op could contain arbitrary expressions on the left
+ * and right, after the shredder, both of those expressions must be a simple
+ * variable; that is, a variable with a Token_variable_name as name, no target,
+ * and no array indices. Wherever we assume this, we use this function
+ * "operand" to extract the variable name. That factors out a bit of recurring
+ * code, and also flags where we make this assumption.
+ */
+
+String* operand(AST_expr* in)
+{
+	AST_variable* var;
+	Token_variable_name* var_name;
+
+	assert(in);
+	
+	var = dynamic_cast<AST_variable*>(in);
+	assert(var);
+	assert(var->target == NULL);
+	assert(var->array_indices->size() == 0);
+
+	var_name = dynamic_cast<Token_variable_name*>(var->variable_name);
+	assert(var_name);
+
+	return var_name->value;
+}
+
+/*
+ * Map of the Zend functions that implement the operators
+ *
+ * The map also contains entries for ++ and --, which are identical to the
+ * entries for + and -, but obviously need to be invoked slightly differently.
+ */
+
+static class Op_functions : public map<string,string>
+{
+public:
+	Op_functions() : map<string,string>()
+	{
+		// Binary functions
+		(*this)["+"] = "add_function";	
+		(*this)["-"] = "sub_function";	
+		(*this)["*"] = "mul_function";	
+		(*this)["/"] = "div_function";	
+		(*this)["%"] = "mod_function";	
+		(*this)["xor"] = "boolean_xor_function";
+		(*this)["|"] = "bitwise_or_function";
+		(*this)["&"] = "bitwise_and_function";
+		(*this)["^"] = "bitwise_xor_function";
+		(*this)["<<"] = "shift_left_function";
+		(*this)[">>"] = "shift_right_function";
+		(*this)["."] = "concat_function";
+		(*this)["=="] = "is_equal_function";
+		(*this)["==="] = "is_identical_function";
+		(*this)["!=="] = "is_not_identical_function";
+		(*this)["!="] = "is_not_equal_function";
+		(*this)["<>"] = "is_not_equal_function";
+		(*this)["<"] = "is_smaller_function";
+		(*this)["<="] = "is_smaller_or_equal_function";
+		// Unary functions
+		(*this)["!"] = "boolean_not_function";
+		(*this)["not"] = "boolean_not_function";
+		(*this)["~"] = "bitwise_not_function";
+		// The operands to the next two functions must be swapped
+		(*this)[">="] = "is_smaller_or_equal_function"; 
+		(*this)[">"] = "is_smaller_function";
+	}
+} op_functions;
+
+/*
+ * Pattern definitions for statements
+ */
+
+class Pattern 
+{
+public:
+	virtual bool match(AST_statement* that) = 0;
+	virtual void generate_code(Generate_C* gen) = 0;
+	virtual ~Pattern() {}
+};
+
+class Method_definition : public Pattern
+{
+public:
+	bool match(AST_statement* that)
+	{
+		pattern = new Wildcard<AST_method>;
+		return that->match(pattern);
+	}
+
+	void generate_code(Generate_C* gen)
+	{
+		signature = pattern->value->signature;
+		gen->methods->push_back(signature->method_name->value);
+
+		method_entry();	
+		gen->visit_statement_list(pattern->value->statements);
+		method_exit();
+	}
+
+protected:
+	Wildcard<AST_method>* pattern;
+	AST_signature* signature;
+
+protected:
+	void method_entry()
+	{
+		cout
+		// Function header
+		<< "PHP_FUNCTION(" << *signature->method_name->value << ")\n"
+		<< "{\n"
+		/**/
+		<< "// Setup locals array\n"
+		<< "HashTable* locals;\n"
+		<< "ALLOC_HASHTABLE(locals);\n"
+		<< "zend_hash_init(locals, 64, NULL, ZVAL_PTR_DTOR, 0);\n"
+		/**/
+		<< "// Function body\n"
+		;
+	}
+
+	void method_exit()
+	{
+		cout
+		// Labels are local to a function
+		<< "end_of_function:;\n" 
+		<< "// Destroy locals array\n"
+		<< "zend_hash_destroy(locals);\n"
+		<< "FREE_HASHTABLE(locals);\n"
+		<< "}\n"
+		;
+	}
+};
+
+class Label : public Pattern
+{
+public:
+	bool match(AST_statement* that)
+	{
+		label = new Wildcard<Token_label_name>;
+		return that->match(new AST_label(label));
+	}
+
+	void generate_code(Generate_C* gen)
+	{
+		cout << *label->value->value << ":;\n";
+	}
+
+protected:
+	Wildcard<Token_label_name>* label;
+};
+
+class Branch : public Pattern
+{
+public:
+	bool match(AST_statement* that)
+	{
+		cond = new Wildcard<Token_variable_name>;
+		iftrue = new Wildcard<Token_label_name>;
+		iffalse = new Wildcard<Token_label_name>;
+		return that->match(new AST_branch(
+			new AST_variable(NULL, cond, new List<AST_expr*>),
+			iftrue, 
+			iffalse
+			));
+	}
+
+	void generate_code(Generate_C* gen)
+	{
+		cout
+		<< "{\n"
+		<< "zval* cond = index_ht(locals, \n"
+		<< "\"" << *cond->value->value << "\", "
+		<< cond->value->value->length() + 1 << ");"
+		<< "if(zend_is_true(cond)) "
+		<< "goto " << *iftrue->value->value << ";\n"
+		<< "else "
+		<< "goto " << *iffalse->value->value << ";\n"
+		<< "}\n"
+		;
+	}
+
+protected:
+	Wildcard<Token_variable_name>* cond;
+	Wildcard<Token_label_name>* iftrue;
+	Wildcard<Token_label_name>* iffalse;
+};
+
+class Goto : public Pattern
+{
+public:
+	bool match(AST_statement* that)
+	{
+		label = new Wildcard<Token_label_name>;
+		return that->match(new AST_goto(label));
+	}
+
+	void generate_code(Generate_C* gen)
+	{
+		cout << "goto " << *label->value->value << ";\n";
+	}
+
+protected:
+	Wildcard<Token_label_name>* label;
+};
+
+/*
+ * Assignment is a "virtual" pattern. It deals with the LHS of the assignment,
+ * but not with the RHS. Various other classes inherit from Assignment, and
+ * deal with the different forms the RHS can take.
+ */
+
+class Assignment : public Pattern
+{
+public:
+	virtual AST_expr* rhs_pattern() = 0;
+	virtual void generate_rhs() = 0;
+	virtual ~Assignment() {}
+
+public:
+	bool match(AST_statement* that)
+	{
+		lhs = new Wildcard<AST_variable>;
+		return that->match(
+			new AST_eval_expr(new AST_assignment(
+				lhs,
+				/* ignored */ false,
+				rhs_pattern()
+			)));
+	}
+
+	void generate_code(Generate_C* gen)
+	{
+		// Open local scope and create a zval* to hold the RHS result
+		cout << "{\n";
+		cout << "zval* rhs;\n";
+
+		// Generate code for the RHS
+		generate_rhs();
+
+		// Variable variable or ordinary variable?
+		Token_variable_name* name;
+		name = dynamic_cast<Token_variable_name*>(lhs->value->variable_name);
+
+		// Ordinary variable
+		if(name != NULL)
+		{
+			if(lhs->value->array_indices->size() == 0)
+			{
+				cout 
+				// Remove the old value from the hashtable
+				// (reducing its refcount)
+				<< "zend_hash_del(locals, "
+				<< "\"" << *name->value << "\", "
+				<< name->value->length() + 1 << ");\n"
+				// Add the new value to the hashtable
+				<< "zend_hash_add(locals, "
+				<< "\"" << *name->value << "\", "
+				<< name->value->length() + 1 << ", "
+				<< "&rhs, sizeof(zval*), NULL);\n"
+				;
+			}
+			else if(
+				lhs->value->array_indices->size() == 1 &&
+				lhs->value->array_indices->front() != NULL
+				)
+			{
+				String* ind = operand(lhs->value->array_indices->front());
+
+				cout 
+				<< "{\n"
+				<< "zval* arr = index_ht(locals, " 
+				<< "\"" << *name->value << "\", "
+				<< name->value->length() + 1 << ");\n"
+				<< "HashTable* ht = extract_ht(arr);\n"
+				<< "zval* ind = index_ht(locals, "
+				<< "\"" << *ind << "\", " << ind->length() + 1 << ");\n"
+				// Numeric index? 
+				<< "if(Z_TYPE_P(ind) == IS_LONG)\n" 
+				<< "{\n"
+				// Remove the old value from the hashtable (this will
+				// automatically reduce its refcount)
+				<< "zend_hash_index_del(ht, Z_LVAL_P(ind));\n"
+				// Add the new value to the hashtable
+				<< "zend_hash_index_update(ht, Z_LVAL_P(ind), "
+				<< "&rhs, sizeof(zval*), NULL);\n"
+				<< "}\n"
+				// String index.
+				<< "else\n"
+				<< "{\n"
+				// Convert to the argument to a string 
+				// TODO: if we know it's a string, we don't need to convert
+				<< "zval* string_index;\n"
+				<< "MAKE_STD_ZVAL(string_index);\n"
+				<< "*string_index = *ind;\n"
+				<< "zval_copy_ctor(string_index);\n"
+				<< "convert_to_string(string_index);\n"
+				// Remove the old value from the hashtable
+				<< "zend_hash_del(ht, Z_STRVAL_P(string_index), Z_STRLEN_P(string_index) + 1);\n"
+				// Add the new value to the hashtable
+				<< "zend_hash_add(ht, Z_STRVAL_P(string_index), Z_STRLEN_P(string_index) + 1, &rhs, sizeof(zval*), NULL);\n"
+				<< "zval_ptr_dtor(&string_index);\n"
+				<< "}\n"
+				<< "}\n"
+				;
+			}
+			else if(
+				lhs->value->array_indices->size() == 1 &&
+				lhs->value->array_indices->front() == NULL
+				)
+			{
+				// Assign to next available index
+				cout 
+				<< "{\n"
+				<< "zval* arr = index_ht(locals, " 
+				<< "\"" << *name->value << "\", "
+				<< name->value->length() + 1 << ");\n"
+				<< "HashTable* ht = extract_ht(arr);\n"
+				<< "zend_hash_next_index_insert(ht, &rhs, sizeof(zval*), NULL);\n"
+				<< "}\n"
+				;
+			}
+			else
+			{
+				// Cannot happen after shredder
+				assert(0);
+			}
+		}
+		else
+		{
+			// TODO
+			assert(0);
+		}
+
+		cout << "}\n"; 				// close local scope
+	}
+
+protected:
+	Wildcard<AST_variable>* lhs;
+};
+
+/*
+ * Assign_literal is another virtual class, and corresponds to assignming an
+ * int, bool, etc. all of which inherit from Assign_literal.
+ */
+
+template<class T>
+class Assign_literal : public Assignment
+{
+public:
+	AST_expr* rhs_pattern()
+	{
+		rhs = new Wildcard<T>;
+		return rhs;
+	}
+
+	void generate_rhs()
+	{
+		cout << "MAKE_STD_ZVAL(rhs);\n";
+		init_rhs();
+	}
+
+	virtual void init_rhs() = 0;
+
+protected:
+	Wildcard<T>* rhs;
+};
+
+class Assign_int : public Assign_literal<Token_int> 
+{
+	void init_rhs()
+	{
+		cout << "ZVAL_LONG(rhs, " << rhs->value->value << ");\n"; 
+	}
+};
+
+class Assign_real : public Assign_literal<Token_real> 
+{
+	void init_rhs()
+	{
+		cout << "ZVAL_DOUBLE(rhs, " << rhs->value->value << ");\n";
+	}
+};
+
+class Assign_bool : public Assign_literal<Token_bool> 
+{
+	void init_rhs()
+	{
+		cout << "ZVAL_BOOL(rhs, " << rhs->value->value << ");\n";
+	}
+};
+
+class Assign_null : public Assign_literal<Token_null> 
+{
+	void init_rhs()
+	{
+		cout << "ZVAL_NULL(rhs);\n";
+	}
+};
+
+class Assign_string : public Assign_literal<Token_string> 
+{
+	void init_rhs()
+	{
+		cout 
+		<< "ZVAL_STRING(rhs, " 
+		<< "\"" << escape(rhs->value->value) << "\", "
+		<< "1);\n"
+		;
+	}
+
+public:
+	static string escape(String* s)
+	{
+		stringstream ss;
+	
+		String::const_iterator i;
+		for(i = s->begin(); i != s->end(); i++)
+		{
+			if(*i == '"')
+			{
+				ss << "\\\"";
+			}
+			else if(*i >= 32 && *i < 127)
+			{
+				ss << *i;
+			}
+			else
+			{
+				ss << "\\x" << setw(2) << setfill('0') << hex << uppercase << (unsigned long int)(unsigned char) *i;
+				ss << resetiosflags(cout.flags());
+			}
+		}
+	
+		return ss.str();
+	}
+};
+
+class Copy : public Assignment
+{
+public:
+	AST_expr* rhs_pattern()
+	{
+		rhs = new Wildcard<AST_variable>;
+		return rhs;
+	}
+
+	void generate_rhs()
+	{
+		// Variable variable or ordinary variable?
+		Token_variable_name* name;
+		name = dynamic_cast<Token_variable_name*>(rhs->value->variable_name);
+
+		// TODO: deal with object indexing
+		assert(rhs->value->target == NULL);
+
+		if(name != NULL)
+		{
+			// Ordinary variable
+			cout
+			<< "rhs = index_ht(locals, "
+			<< "\"" << *name->value << "\", "
+			<< name->value->length() + 1 << ");"
+			;
+			
+			if(rhs->value->array_indices->size() == 1)
+			{
+				String* ind = operand(rhs->value->array_indices->front());
+
+				cout 
+				<< "{\n"
+				<< "HashTable* ht = extract_ht(rhs);"
+				<< "zval* ind = index_ht(locals, "
+				<< "\"" << *ind << "\", " << ind->length() + 1 << ");\n"
+				<< "rhs = index_ht_zval(ht, ind);\n"
+				<< "}\n"
+				;
+			}
+		}
+		else
+		{
+			// Variable variable.
+			// After shredder, a variable variable cannot have array indices
+			assert(rhs->value->array_indices->size() == 0);
+
+			AST_reflection* refl;
+			refl = dynamic_cast<AST_reflection*>(rhs->value->variable_name);
+			String* name = operand(refl->expr);
+
+			cout 
+			<< "{\n"
+			<< "zval* name = index_ht(locals, "
+			<< "\"" << *name << "\", " << name->length() + 1 << ");\n"
+			<< "rhs = index_ht_zval(locals, name);\n"
+			<< "}\n"
+			;
+		}
+	}
+
+protected:
+	Wildcard<AST_variable>* rhs;
+};
+
+class Method_invocation : public Assignment
+{
+public:
+	AST_expr* rhs_pattern()
+	{
+		rhs = new Wildcard<AST_method_invocation>;
+		return rhs;
+	}
+
+	void generate_rhs()
+	{
+		// Variable function or ordinary function?
+		Token_method_name* name;
+		name = dynamic_cast<Token_method_name*>(rhs->value->method_name);
+
+		if(name != NULL)
+		{
+			cout
+			<< "// Create zval to hold function name\n"
+			<< "zval function_name;\n"
+			<< "INIT_PZVAL(&function_name);\n"
+			<< "ZVAL_STRING(&function_name, "
+			<< "\"" << *name->value << "\", "
+			<< "0);\n"
+			;
+		}
+		else
+		{
+			assert(0);
+		}
+		
+		cout
+		<< "zval* function_name_ptr;\n"
+		<< "function_name_ptr = &function_name;\n"
+		;
+
+		cout 
+		<< "// Setup array of arguments\n"
+		<< "zval* args[" << rhs->value->actual_parameters->size() << "];\n"
+		;
+
+		List<AST_actual_parameter*>::const_iterator i;
+		unsigned index = 0;
+		for(
+			i = rhs->value->actual_parameters->begin(); 
+			i != rhs->value->actual_parameters->end(); 
+			i++, index++)
+		{
+			String* op = operand((*i)->expr);
+
+			cout
+			<< "args[" << index << "] = index_ht(locals, "
+			<< "\"" << *op << "\", " << op->length() + 1 << ");\n"
+			;
+		}
+	
+		cout
+		<< "// Call the function\n"
+		<< "int success;\n"	
+		<< "MAKE_STD_ZVAL(rhs);\n"
+		<< "success = call_user_function(EG(function_table), " 
+		<< "NULL, function_name_ptr, rhs, " 
+		<< rhs->value->actual_parameters->size() << ", args TSRMLS_CC);\n"
+		<< "assert(success == SUCCESS);\n"
+		;
+	}
+
+protected:
+	Wildcard<AST_method_invocation>* rhs;
+};
+
+class Bin_op : public Assignment
+{
+public:
+	AST_expr* rhs_pattern()
+	{
+		left = new Wildcard<Token_variable_name>;
+		op = new Wildcard<Token_op>;
+		right = new Wildcard<Token_variable_name>;
+
+		return new AST_bin_op(
+			new AST_variable(NULL, left, new List<AST_expr*>),
+			op, 
+			new AST_variable(NULL, right, new List<AST_expr*>)
+			); 
+	}
+
+	void generate_rhs()
+	{
+		assert(
+			op_functions.find(*op->value->value) != 
+			op_functions.end());
+		string op_fn = op_functions[*op->value->value]; 
+
+		cout 
+		<< "zval* left = index_ht(locals, "
+		<< "\"" << *left->value->value << "\", "
+		<< left->value->value->length() + 1 << ");\n"
+		<< "zval* right = index_ht(locals, "
+		<< "\"" << *right->value->value << "\", "
+		<< right->value->value->length() + 1 << ");\n"
+		<< "MAKE_STD_ZVAL(rhs);\n"
+		;
+
+		// some operators need the operands to be reversed (since we call the
+		// opposite function). This is accounted for in the binops table.
+		if(*op->value->value == ">" || *op->value->value == ">=")
+			cout << op_fn << "(rhs, right, left TSRMLS_CC);\n";
+		else
+			cout << op_fn << "(rhs, left, right TSRMLS_CC);\n";
+	}
+
+protected:
+	Wildcard<Token_variable_name>* left;
+	Wildcard<Token_op>* op;
+	Wildcard<Token_variable_name>* right;
+};
+
+class Unary_op : public Assignment
+{
+public:
+	AST_expr* rhs_pattern()
+	{
+		op = new Wildcard<Token_op>;
+		expr = new Wildcard<Token_variable_name>;
+
+		return new AST_unary_op(op,
+			new AST_variable(NULL, expr, new List<AST_expr*>)); 
+	}
+
+	void generate_rhs()
+	{
+		assert(
+			op_functions.find(*op->value->value) != 
+			op_functions.end());
+		string op_fn = op_functions[*op->value->value]; 
+
+		cout 
+		<< "zval* expr = index_ht(locals, "
+		<< "\"" << *expr->value->value << "\", "
+		<< expr->value->value->length() + 1 << ");\n"
+		<< "MAKE_STD_ZVAL(rhs);\n"
+		<< op_fn << "(rhs, expr TSRMLS_CC);\n"
+		;
+	}
+
+protected:
+	Wildcard<Token_op>* op;
+	Wildcard<Token_variable_name>* expr;
+};
+
+class Return : public Pattern
+{
+	bool match(AST_statement* that)
+	{
+		expr = new Wildcard<AST_expr>;
+		return(that->match(new AST_return(expr)));
+	}
+
+	void generate_code(Generate_C* gen)
+	{
+		String* op = operand(expr->value);
+
+		cout
+		<< "{\n"
+		<< "*return_value = *index_ht(locals, "
+		<< "\"" << *op << "\", " << op->length() + 1 << ");\n"
+		<< "zval_copy_ctor(return_value);\n"
+		<< "goto end_of_function;\n"
+		<< "}\n"
+		;
+	}
+
+protected:
+	Wildcard<AST_expr>* expr;
+};
+
+class Unset : public Pattern
+{
+	bool match(AST_statement* that)
+	{
+		var = new Wildcard<AST_variable>;
+		return(that->match(new AST_unset(var)));
+	}
+
+	void generate_code(Generate_C* gen)
+	{
+		// TODO: deal with object indexing
+		assert(var->value->target == NULL);
+
+		Token_variable_name* name;
+		name = dynamic_cast<Token_variable_name*>(var->value->variable_name);
+
+		if(name != NULL)
+		{
+			if(var->value->array_indices->size() == 0)
+			{
+				cout
+				<< "zend_hash_del(locals, "
+				<< "\"" << *name->value << "\", "
+				<< name->value->length() + 1 << ");"
+				;
+			}
+			else 
+			{
+				assert(var->value->array_indices->size() == 1);
+				String* ind = operand(var->value->array_indices->front());
+
+				cout
+				<< "{\n"
+				<< "zval* arr = index_ht(locals, "
+				<< "\"" << *name->value << "\", " 
+				<< name->value->length() + 1 << ");"
+				<< "HashTable* ht = extract_ht(arr);"
+				<< "zval* ind = index_ht(locals, "
+				<< "\"" << *ind << "\", " << ind->length() + 1 << ");"
+				// Numeric index?
+				<< "if(Z_TYPE_P(ind) == IS_LONG)\n"
+				<< "{\n"
+				<< "zend_hash_index_del(ht, Z_LVAL_P(ind));\n"
+				<< "}\n"
+				// String index 
+				<< "else\n"
+				<< "{\n"
+				// TODO Code duplication
+				<< "zval* string_index;\n"
+				<< "MAKE_STD_ZVAL(string_index);\n"
+				<< "*string_index = *ind;\n"
+				<< "zval_copy_ctor(string_index);\n"
+				<< "convert_to_string(string_index);\n"
+				<< "zend_hash_del(ht, Z_STRVAL_P(string_index), Z_STRLEN_P(string_index) + 1);\n"
+				<< "zval_ptr_dtor(&string_index);\n"
+				<< "}\n"
+				<< "}\n"
+				;
+			}
+		}
+		else
+		{
+			// Variable variable
+			// TODO
+			assert(0);
+		}
+	}
+
+protected:
+	Wildcard<AST_variable>* var;
+};
+
+/*
+ * Visitor methods to generate C code
+ * Visitor for statements uses the patterns defined above.
+ */
+
+void Generate_C::children_statement(AST_statement* in)
+{
+	Pattern* patterns[] = 
+	{
+		new Method_definition()
+	,	new Assign_string()
+	,	new Assign_int()
+	,	new Assign_null()
+	,	new Assign_bool()
+	,	new Assign_real()
+	,	new Copy()
+	,	new Method_invocation()
+	,	new Bin_op()
+	,	new Unary_op()
+	,	new Label()
+	,	new Branch()
+	,	new Goto()
+	,	new Return()
+	,	new Unset()
+	};
+
+	bool matched = false;
+	for(unsigned i = 0; i < sizeof(patterns) / sizeof(Pattern*); i++)
+	{
+		if(patterns[i]->match(in))
+		{
+			patterns[i]->generate_code(this);
+			matched = true;
+		}
+	}
+
+	if(not matched)
+	{
+		PHP_unparser pup(cerr);
+		cerr << "could not generate code for ";
+		in->visit(&pup);
+		abort();
+	}
+}
+
+void Generate_C::pre_php_script(AST_php_script* in)
+{
+	// Some common functions
+	cout 
+	<< "#include \"php.h\"\n"
+	// Index a hashtable
+	<< "zval* index_ht(HashTable* ht, char* key, int len)\n" 
+	<< "{\n"
+	<< "zval** zvpp;\n"
+	<< "if(zend_hash_find(ht, key, len, (void**)&zvpp) != SUCCESS)\n"
+	<< "{\n"
+	<< "zval* zvp;\n"
+	<< "ALLOC_INIT_ZVAL(zvp);\n"
+	<< "zend_hash_add(ht, key, len, &zvp, sizeof(zval*), NULL);\n"
+	<< "zend_hash_find(ht, key, len, (void**)&zvpp);\n"
+	<< "}\n"
+	<< "return *zvpp;\n"
+	<< "}\n"
+
+	// Index a hashtable using a zval*
+	<< "zval* index_ht_zval(HashTable* ht, zval* ind)\n"
+	<< "{\n"
+	<< "zval* result;\n"
+	// Numeric index
+	<< "if(Z_TYPE_P(ind) == IS_LONG)\n"
+	<< "{\n"
+	<< "zval** zvpp;\n"
+	<< "if(zend_hash_index_find(ht, Z_LVAL_P(ind), (void**)&zvpp) != SUCCESS)\n"
+	<< "{\n"
+	<< "zval* zvp;\n"
+	<< "ALLOC_INIT_ZVAL(zvp);\n"
+	<< "zend_hash_index_update(ht, Z_LVAL_P(ind), &zvp, sizeof(zval*), NULL);\n"
+	<< "zend_hash_index_find(ht, Z_LVAL_P(ind), (void**)&zvpp);\n"
+	<< "}\n"
+	<< "result = *zvpp;\n"
+	<< "}\n"
+	// String index. 
+	<< "else\n"
+	<< "{\n"
+	<< "zval* string_index;\n"
+	<< "MAKE_STD_ZVAL(string_index);\n"
+	<< "*string_index = *ind;\n"
+	<< "zval_copy_ctor(string_index);\n"
+	<< "convert_to_string(string_index);\n"
+	<< "result = index_ht(ht, Z_STRVAL_P(string_index), Z_STRLEN_P(string_index) + 1);\n"
+	<< "zval_ptr_dtor(&string_index);\n"
+	<< "}\n"
+	<< "return result;\n"
+	<< "}\n"
+
+	// Extract the hashtable from a hash-valued zval
+	<< "HashTable* extract_ht(zval* arr)\n"
+	<< "{\n"
+	<< "if(Z_TYPE_P(arr) == IS_NULL)\n"
+	<< "array_init(arr);\n"
+	<< "else if(Z_TYPE_P(arr) != IS_ARRAY)\n"
+	// TODO: proper error message
+	<< "assert(0);\n"
+	<< "return Z_ARRVAL_P(arr);\n"
+	<< "}\n"
+	;
+}
+
+void Generate_C::post_php_script(AST_php_script* in)
+{
+	cout 
+		<< "// Register all functions with PHP\n"
+		<< "static function_entry " << *extension_name << "_functions[] = {\n"
+		;
+
+	List<String*>::const_iterator i;
+	for(i = methods->begin(); i != methods->end(); i++)
+		cout << "PHP_FE(" << **i << ", NULL)\n";
+
+	cout << "{ NULL, NULL, NULL }\n";
+	cout << "};\n";
+
+	cout
+		<< "// Register the module itself with PHP\n"
+		<< "zend_module_entry " << *extension_name << "_module_entry = {\n"
+		<< "STANDARD_MODULE_HEADER, \n"
+		<< "\"" << *extension_name << "\",\n"
+		<< *extension_name << "_functions,\n"
+		<< "NULL, /* MINIT */\n"
+		<< "NULL, /* MSHUTDOWN */\n"
+		<< "NULL, /* RINIT */\n"
+		<< "NULL, /* RSHUTDOWN */\n"
+		<< "NULL, /* MINFO */\n"
+		<< "\"1.0\",\n"
+		<< "STANDARD_MODULE_PROPERTIES\n"
+		<< "};\n"
+		;
+
+	if(is_extension)
+	{
+		cout << "ZEND_GET_MODULE(" << *extension_name << ")\n";
+	}
+	else
+	{
+		cout << "#include <sapi/embed/php_embed.h>\n";
+		cout << "#include <signal.h>\n\n";
+	
+		cout <<
+		"void sighandler(int signum)\n"
+		"{\n"
+		"	switch(signum)\n"
+		"	{\n"
+		"		case SIGABRT:\n"
+		"			printf(\"SIGABRT received!\\n\");\n"
+		"			break;\n"
+		"		case SIGSEGV:\n"
+		"			printf(\"SIGSEGV received!\\n\");\n"
+		"			break;\n"
+		"		default:\n"
+		"			printf(\"Unknown signal received!\\n\");\n"
+		"			break;\n"
+		"	}\n"
+		"\n"
+		"	printf(\"This could be a bug in phc. If you suspect it is, please email\\n\");\n"
+		"	printf(\"a bug report to phc-general@phpcompiler.org.\\n\");\n"
+		"	exit(-1);\n"
+		"}\n";
+	
+		cout << 
+		"\n"
+		"int\n"
+		"main (int argc, char* argv[])\n"
+		"{\n"
+		"    signal(SIGABRT, sighandler);\n"
+		"    signal(SIGSEGV, sighandler);\n"
+		"\n"
+		"    PHP_EMBED_START_BLOCK (argc, argv)\n"
+		"\n"
+		"    // load the compiled extension\n"
+		"    zend_startup_module (&" << *extension_name << "_module_entry);\n"
+		"\n"
+		"    zval main_name;\n"
+		"    ZVAL_STRING (&main_name, \"__MAIN__\", NULL);\n"
+		"\n"
+		"    zval retval;\n"
+		"\n"
+		"    // call __MAIN__\n"
+		"    int success = call_user_function( \n"
+		"				     EG (function_table),\n"
+		"				     NULL,\n"
+		"				     &main_name,\n"
+		"				     &retval,\n"
+		"				     0,\n"
+		"				     NULL\n"
+		"				     TSRMLS_CC);\n"
+		"	\n"
+		"   PHP_EMBED_END_BLOCK()"
+		"\n"
+		"  return 0;\n"
+		"}\n" ;
+	}
+}
+
+/*
+ * Bookkeeping 
+ */
+
+Generate_C::Generate_C(String* extension_name)
+{
+	if(extension_name != NULL)
+	{
+		this->extension_name = extension_name;
+		is_extension = true;
+	}
+	else
+	{
+		this->extension_name = new String("app");
+		is_extension = false;
+	}
+
+	methods = new List<String*>;
+}
+
+#ifdef OBSOLETE
 
 /*
  * Variabes set by the code generator
@@ -47,45 +1040,6 @@
 static List<String*> methods;		// list of all methods compiled
 static List<String*> eofn_labels;	// end of function labels
 
-/*
- * Map of the Zend functions that implement the binary operators
- * The map also contains entries for ++ and --, which are identical to the
- * entries for + and -, but obviously need to be invoked slightly differently.
- */
-
-static class Bin_op_functions : public map<string,string>
-{
-public:
-	Bin_op_functions() : map<string,string>()
-	{
-		(*this)["+"] = "add_function";	
-		(*this)["-"] = "sub_function";	
-		(*this)["*"] = "mul_function";	
-		(*this)["/"] = "div_function";	
-		(*this)["%"] = "mod_function";	
-		(*this)["xor"] = "boolean_xor_function";
-		(*this)["!"] = "boolean_not_function";
-		(*this)["not"] = "boolean_not_function";
-		(*this)["~"] = "bitwise_not_function";
-		(*this)["|"] = "bitwise_or_function";
-		(*this)["&"] = "bitwise_and_function";
-		(*this)["^"] = "bitwise_xor_function";
-		(*this)["<<"] = "shift_left_function";
-		(*this)[">>"] = "shift_right_function";
-		(*this)["."] = "concat_function";
-		(*this)["=="] = "is_equal_function";
-		(*this)["==="] = "is_identical_function";
-		(*this)["!=="] = "is_not_identical_function";
-		(*this)["!="] = "is_not_equal_function";
-		(*this)["<>"] = "is_not_equal_function";
-		(*this)["<"] = "is_smaller_function";
-		(*this)["<="] = "is_smaller_or_equal_function";
-		(*this)[">="] = "is_smaller_function"; // This one looks wrong, but we reverse the operands to make this
-		(*this)[">"] = "is_smaller_or_equal_function"; // This one too
-		(*this)["++"] = "add_function";
-		(*this)["--"] = "sub_function";
-	}
-} bin_op_functions;
 
 /* TODO we can support break's with computed gotos :) */
 
@@ -256,83 +1210,6 @@ void Generate_C::update_hash(AST_variable* var, String* val)
 	}
 }
 
-
-/*
- * Constructor
- */
-
-Generate_C::Generate_C(String* extension_name)
-{
-	if(extension_name != NULL)
-	{
-		this->extension_name = extension_name;
-		is_extension = true;
-	}
-	else
-	{
-		this->extension_name = new String("app");
-		is_extension = false;
-	}
-}
-
-/*
- * Tokens
- */
-
-void Generate_C::post_string(Token_string* in)
-{
-	String* s = fresh("string");
-
-	cout << "zval* " << *s << ";\n";
-	cout << "MAKE_STD_ZVAL(" << *s << ");\n";
-	cout << "ZVAL_STRING(" << *s << ", \"";
-	escape(in->value);
-	cout << "\", 1);\n";
-
-	in->attrs->set(LOC, s);
-	cout << "zend_hash_next_index_insert(temps, &" << *s << ", sizeof(zval*), NULL);\n";
-}
-
-void Generate_C::post_int(Token_int* in)
-{
-	String* i = fresh("int");
-
-	cout << "zval* " << *i << ";\n";
-	cout << "MAKE_STD_ZVAL(" << *i << ");\n";
-	cout << "ZVAL_LONG(" << *i << ", " << in->value << ");\n";
-
-	in->attrs->set(LOC, i);
-	cout << "zend_hash_next_index_insert(temps, &" << *i << ", sizeof(zval*), NULL);\n";
-}
-
-void Generate_C::post_bool(Token_bool* in)
-{
-	String* b = fresh("bool");
-
-	cout << "zval* " << *b << ";\n";
-	cout << "MAKE_STD_ZVAL(" << *b << ");\n";
-	
-	if(in->value)
-		cout << "ZVAL_TRUE(" << *b << ");";
-	else
-		cout << "ZVAL_FALSE(" << *b << ");";
-	
-	in->attrs->set(LOC, b);
-	cout << "zend_hash_next_index_insert(temps, &" << *b << ", sizeof(zval*), NULL);\n";
-}
-
-void Generate_C::post_null(Token_null* in)
-{
-	String* n = fresh("null");
-	
-	cout << "zval*" << *n << ";\n";
-	cout << "ALLOC_INIT_ZVAL(" << *n << ");\n";
-
-	in->attrs->set(LOC, n);
-	// TODO: should we up the refcount when interesting into the temps array?
-	cout << "zend_hash_next_index_insert(temps, &" << *n << ", sizeof(zval*), NULL);\n";
-}
-
 /*
  * Method invocation
  */
@@ -344,7 +1221,7 @@ void Generate_C::post_method_invocation(AST_method_invocation* in)
 	Wildcard<AST_expr>* eval_arg = new Wildcard<AST_expr>;
 
 	pattern = new AST_method_invocation(
-		new Token_class_name(new String("%STDLIB%")),
+		NULL,	
 		new Token_method_name(new String("eval")),
 		new List<AST_actual_parameter*>(
 			new AST_actual_parameter(false, eval_arg)
@@ -438,134 +1315,6 @@ void Generate_C::post_method_invocation(AST_method_invocation* in)
 	cout << "}\n";
 
 	in->attrs->set(LOC, addr(ret_val));	
-}
-
-/*
- * Simple statements
- */
-
-void Generate_C::post_return(AST_return* in)
-{
-	cout << "*return_value = *" << *in->expr->attrs->get_string(LOC) << ";\n";
-	cout << "zval_copy_ctor(return_value);\n";
-	cout << "goto " << *eofn_labels.back() << ";\n";
-}
-
-void Generate_C::children_bin_op(AST_bin_op* in)
-{
-	String* binop_result = fresh("binop_result");
-	cout << "zval* " << *binop_result << ";\n";
-
-	/**/
-	cout << "// Evaluate left operand of " << *in->op->value << "\n";
-	visit_expr(in->left);
-
-	if(*in->op->value == "&&" || *in->op->value == "and")
-	{
-		String* after_binop = fresh("after_binop");
-		// TODO: do we need to clone before assigning to binop_result?
-		cout << *binop_result << " = " << *in->left->attrs->get_string(LOC) << ";\n";
-
-		cout << "if(!zend_is_true(" << *in->left->attrs->get_string(LOC) << ")) goto " << *after_binop << ";\n";
-		
-		/**/
-		cout << "// Evaluate right operand of " << *in->op->value << "\n";
-		visit_expr(in->right);
-		cout << *binop_result << " = " << *in->right->attrs->get_string(LOC) << ";\n"; 
-
-		cout << *after_binop << ":;\n"; 
-	}
-	else if(*in->op->value == "||" || *in->op->value == "or")
-	{
-		String* after_binop = fresh("after_binop");
-		// TODO: do we need to clone before assigning to binop_result?
-		cout << *binop_result << " = " << *in->left->attrs->get_string(LOC) << ";\n";
-
-		cout << "if(zend_is_true(" << *in->left->attrs->get_string(LOC) << ")) goto " << *after_binop << ";\n";
-		
-		/**/
-		cout << "// Evaluate right operand of " << *in->op->value << "\n";
-		visit_expr(in->right);
-		cout << *binop_result << " = " << *in->right->attrs->get_string(LOC) << ";\n"; 
-
-		cout << *after_binop << ":;\n"; 
-	}
-	else
-	{
-		cout << "// Evaluate right operand of " << *in->op->value << "\n";
-		visit_expr(in->right);
-		
-		cout << "// Evaluate " << *in->op->value << "\n";	
-		cout << "MAKE_STD_ZVAL(" << *binop_result << ");\n";
-
-		assert (bin_op_functions.find(*in->op->value) != bin_op_functions.end());
-
-		// some operators need the operands to be reversed (since we call the opposite function). This is accounted for in the binops table.
-		if (*in->op->value == ">" || *in->op->value == ">=")
-		{
-			cout << bin_op_functions[*in->op->value] << "(" << *binop_result << ", "
-				<< *in->right->attrs->get_string(LOC) << ", " 
-				<< *in->left->attrs->get_string(LOC) << " TSRMLS_CC);\n";
-		}
-		else
-		{
-			cout << bin_op_functions[*in->op->value] << "(" << *binop_result << ", "
-				<< *in->left->attrs->get_string(LOC) << ", " 
-				<< *in->right->attrs->get_string(LOC) << " TSRMLS_CC);\n";
-		}
-	}
-
-	in->attrs->set(LOC, binop_result);
-	cout << "zend_hash_next_index_insert(temps, &" << *binop_result << ", sizeof(zval*), NULL);\n";
-}
-
-void Generate_C::post_pre_op(AST_pre_op* in)
-{
-	/**/
-	cout << "// Evaluate pre-op\n";
-
-	cout << "{";
-
-	cout << "zval one;\n";
-	cout << "INIT_ZVAL(one);\n";
-	cout << "ZVAL_LONG(&one, 1);\n";
-
-	cout << bin_op_functions[*in->op->value] << "("; 
-	cout << *in->variable->attrs->get_string(LOC);
-	cout << ", " << *in->variable->attrs->get_string(LOC);
-	cout << ", &one TSRMLS_CC);\n";
-
-	cout << "}";
-	
-	in->attrs->set(LOC, in->variable->attrs->get(LOC));
-}
-
-void Generate_C::post_post_op(AST_post_op* in)
-{
-	/**/
-	cout << "// Evaluate post-op\n";
-
-	String* before_post_op = fresh("before_post_op");
-	cout << "zval* " << *before_post_op << ";\n";
-	
-	cout << "{";
-	cout << "zval one;\n";
-	cout << "INIT_ZVAL(one);\n";
-	cout << "ZVAL_LONG(&one, 1);\n";
-
-	cout << "MAKE_STD_ZVAL(" << *before_post_op << ");\n";
-	cout << "*" << *before_post_op << " = *" << *in->variable->attrs->get_string(LOC) << ";\n";
-	cout << "zval_copy_ctor(" << *before_post_op << ");\n";
-
-	cout << bin_op_functions[*in->op->value] << "("; 
-	cout << *in->variable->attrs->get_string(LOC);
-	cout << ", " << *in->variable->attrs->get_string(LOC);
-	cout << ", &one TSRMLS_CC);\n"; ;
-
-	cout << "}";
-	
-	in->attrs->set(LOC, before_post_op);
-	cout << "zend_hash_next_index_insert(temps, &" << *before_post_op << ", sizeof(zval*), NULL);\n";
 }
 
 void Generate_C::post_unset(AST_unset* in)
@@ -686,29 +1435,6 @@ void Generate_C::post_assignment(AST_assignment* in)
 }
 
 /*
- * Control statements
- */
-
-void Generate_C::children_if(AST_if* in)
-{
-	assert (0);
-}
-
-void Generate_C::children_hir_if(AST_hir_if* in)
-{
-	visit_expr(in->expr);
-	cout << "if (zend_is_true(" << *in->expr->attrs->get_string(LOC) << ")) \n";
-	visit_statement (in->iftrue);
-	cout << "else \n";
-	visit_statement (in->iffalse);
-}
-
-void Generate_C::children_for(AST_for* in)
-{
-	assert (0);
-}
-
-/*
  * Variable references
  */
 
@@ -770,15 +1496,14 @@ void Generate_C::post_variable(AST_variable* in)
  * Method definition
  */
 
-void 
-Generate_C::start_method (String* name, List<AST_formal_parameter*> *parameters)
+void Generate_C::pre_method(AST_method* in)
 {
 	// We need a label to indicate where the end of the function is
 	String* eofn = fresh("end_of_function");
 	eofn_labels.push_back(eofn);
 
-	cout << "PHP_FUNCTION(" << *name << ")\n";
-	methods.push_back(name);
+	cout << "PHP_FUNCTION(" << *in->signature->method_name->value << ")\n";
+	methods.push_back(in->signature->method_name->value);
 
 	cout << "{\n";
 
@@ -801,6 +1526,7 @@ Generate_C::start_method (String* name, List<AST_formal_parameter*> *parameters)
 	cout << "zend_hash_init(temps, 64, NULL, ZVAL_PTR_DTOR, 0);\n";
 
 	/**/
+	List<AST_formal_parameter*>* parameters = in->signature->formal_parameters;
 	if(parameters && parameters->size() > 0)
 	{
 		cout << "// Add all parameters as local variables\n";
@@ -840,15 +1566,7 @@ Generate_C::start_method (String* name, List<AST_formal_parameter*> *parameters)
 	cout << "// Function body\n";
 }
 
-void
-Generate_C::pre_method(AST_method* in)
-{
-	start_method (in->signature->method_name->value, in->signature->formal_parameters);
-}
-
-/* Methods are automatically matched with pre_method and post_method. So if you call this out of turn, you'd better have them correctly matched */
-void
-Generate_C::end_method ()
+void Generate_C::post_method(AST_method* in)
 {
 	String* eofn = eofn_labels.back();
 	eofn_labels.pop_back();
@@ -869,58 +1587,6 @@ Generate_C::end_method ()
 	cout << "EG(active_symbol_table) = old_active_symbol_table;\n";	
 
 	cout << "}\n";
-}
-void Generate_C::post_method(AST_method* in)
-{
-	end_method ();
-}
-
-
-/*
- * Top-level structure
- */
-
-void Generate_C::pre_php_script(AST_php_script* in)
-{
-	cout << "#include \"php.h\"\n";
-
-	start_method (new String ("main_run"), NULL);
-}
-
-void Generate_C::post_php_script(AST_php_script* in)
-{
-	end_method ();
-
-	/**/
-	cout << "// Register all functions with PHP\n";
-	cout << "static function_entry " << *extension_name << "_functions[] = {\n";
-
-	List<String*>::const_iterator i;
-	for(i = methods.begin(); i != methods.end(); i++)
-		cout << "PHP_FE(" << **i << ", NULL)\n";
-
-	cout << "{ NULL, NULL, NULL }\n";
-	cout << "};\n";
-
-	/**/
-	cout << "// Register the module itself with PHP\n";
-	cout << "zend_module_entry " << *extension_name << "_module_entry = {\n";
-	cout << "STANDARD_MODULE_HEADER, \n";
-	cout << "\"" << *extension_name << "\",\n";
-	cout << *extension_name << "_functions,\n";
-	cout << "NULL, /* MINIT */\n";
-	cout << "NULL, /* MSHUTDOWN */\n";
-	cout << "NULL, /* RINIT */\n";
-	cout << "NULL, /* RSHUTDOWN */\n";
-	cout << "NULL, /* MINFO */\n";
-	cout << "\"1.0\",\n";
-	cout << "STANDARD_MODULE_PROPERTIES\n";
-	cout << "};\n";
-
-	if(is_extension)
-		cout << "ZEND_GET_MODULE(" << *extension_name << ")\n";
-	else
-		driver();
 }
 
 /*
@@ -951,138 +1617,4 @@ void Generate_C::children_eval_expr(AST_eval_expr* in)
 	}
 }
 
-void
-Generate_C::children_goto (AST_goto *in)
-{
-	cout << "goto " << *(in->label_name->value) << ";" << endl;
-}
-
-void
-Generate_C::children_label (AST_label* in)
-{
-	// getting a few errors with this. I expect we are not allowed put a label
-	// before another label, or before a declaration. Added semicolon to be sure
-	cout << *(in->label_name->value) << ": ;" << endl;
-}
-
-/*
- * Driver (to turn the extension into a stand-alone application)
- */
-
-void Generate_C::driver()
-{
-	cout << "#include <sapi/embed/php_embed.h>\n";
-	cout << "#include <signal.h>\n\n";
-
-	/* TODO this is always a bug in phc. If not, we'll post it to the FAQ or something. */
-
-	cout <<
-	"void sighandler(int signum)\n"
-	"{\n"
-	"	switch(signum)\n"
-	"	{\n"
-	"		case SIGABRT:\n"
-	"			printf(\"SIGABRT received!\\n\");\n"
-	"			break;\n"
-	"		case SIGSEGV:\n"
-	"			printf(\"SIGSEGV received!\\n\");\n"
-	"			break;\n"
-	"		default:\n"
-	"			printf(\"Unknown signal received!\\n\");\n"
-	"			break;\n"
-	"	}\n"
-	"\n"
-	"	printf(\"This could be a bug in phc. If you suspect it is, please email\\n\");\n"
-	"	printf(\"a bug report to phc-general@phpcompiler.org.\\n\");\n"
-	"	exit(-1);\n"
-	"}\n";
-
-	cout << 
-	"\n"
-	"int\n"
-	"main (int argc, char* argv[])\n"
-	"{\n"
-	"    signal(SIGABRT, sighandler);\n"
-	"    signal(SIGSEGV, sighandler);\n"
-	"\n"
-	"    PHP_EMBED_START_BLOCK (argc, argv)\n"
-	"\n"
-	"    // load the compiled extension\n"
-	"    zend_startup_module (&" << *extension_name << "_module_entry);\n"
-	"\n"
-	"    zval main_run_name;\n"
-	"    ZVAL_STRING (&main_run_name, \"main_run\", NULL);\n"
-	"\n"
-	"    zval retval;\n"
-	"\n"
-	"    // call %MAIN%::run\n"
-	"    int success = call_user_function( \n"
-	"				     EG (function_table),\n"
-	"				     NULL,\n"
-	"				     &main_run_name,\n"
-	"				     &retval,\n"
-	"				     0,\n"
-	"				     NULL\n"
-	"				     TSRMLS_CC);\n"
-	"	\n"
-	"  PHP_EMBED_END_BLOCK()\n"
-	"\n"
-	"  return 0;\n"
-	"}\n" ;
-}
-
-/*
- * Various utility functions 
- */
-
-void Generate_C::escape(String* s)
-{
-	String::const_iterator i;
-	for(i = s->begin(); i != s->end(); i++)
-	{
-		if(*i == '"')
-		{
-			cout << "\\\"";
-		}
-		else if(*i >= 32 && *i < 127)
-		{
-			cout << *i;
-		}
-		else
-		{
-			cout << "\\x" << setw(2) << setfill('0') << hex << uppercase << (unsigned long int)(unsigned char) *i;
-			cout << resetiosflags(cout.flags());
-		}
-	}
-}
-
-/* Generate a new temporary name, with the passed PREFIX */
-String* Generate_C::fresh(string prefix)
-{
-	static map<string, int> temps;
-	int t = temps[prefix]++;
-	stringstream ss;
-	ss << prefix << t;
-	return new String(ss.str()); 
-}
-
-String* Generate_C::addr(String* var)
-{
-	stringstream ss;
-	ss << "&" << *var;
-	return new String(ss.str());
-}
-
-String* Generate_C::deref(String* var)
-{
-	stringstream ss;
-	ss << "*" << *var;
-	return new String(ss.str());
-}
-
-String* Generate_C::quote(String* str)
-{
-	stringstream ss;
-	ss << '"' << *str << '"';
-	return new String(ss.str());
-}
+#endif

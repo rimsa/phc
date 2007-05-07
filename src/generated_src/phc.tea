@@ -26,9 +26,9 @@ statement ::=
      class_def | interface_def | method  
    | if | while | do | for | foreach 
    | switch | break | continue | return
-   | static_declaration
+   | static_declaration | global
    | unset | declare | try | throw | eval_expr | nop 
-	| label | goto | hir_if ;
+	| label | goto | branch ;
 
 class_def ::= 
    class_mod CLASS_NAME extends:CLASS_NAME? implements:INTERFACE_NAME* member* ;
@@ -59,15 +59,14 @@ break ::= expr? ;
 continue ::= expr? ;
 return ::= expr? ;
 
-{- A small bit of a grammar hack here. If we lower to AST_ifs, we might accidentally relower
-them, and it's tedious to check for this. The ideal would be to have an if with
-a different prefix, but this is as near as we can get I think. This hack has
-the benefit that we dont have to hack anything within the compiler (except
-perhaps to assert that the lowered statements have been removed). -}
-hir_if ::= expr iftrue:goto iffalse:goto ;
+
+branch ::= expr iftrue:LABEL_NAME iffalse:LABEL_NAME;
+goto ::= LABEL_NAME ;
+label ::= LABEL_NAME ;
 
 
 static_declaration ::= VARIABLE_NAME expr? ;
+global ::= variable_name ;
 unset ::= variable ;
 
 declare ::= directive+ statement* ;
@@ -81,9 +80,6 @@ eval_expr ::= expr ;
 
 nop ::= ;
 
-goto ::= LABEL_NAME ;
-label ::= LABEL_NAME ;
-
 expr ::=
      assignment | list_assignment | cast | unary_op | bin_op | conditional_expr
    | ignore_errors | constant | instanceof
@@ -95,9 +91,9 @@ literal ::= INT<int> | REAL<double> | STRING<String*> | BOOL<bool> | NULL<> ;
    
 assignment ::= variable is_ref:"&"? expr ;
 
-list_assignment ::= list_elements expr ;
-list_elements ::= list_element?* ;
-list_element ::= variable | list_elements ;
+list_assignment ::= list_element?* expr ;
+list_element ::= variable | nested_list_elements ;
+nested_list_elements ::= list_element?* ;
 
 cast ::= CAST expr ;
 unary_op ::= OP expr ;
@@ -106,7 +102,7 @@ bin_op ::= left:expr OP right:expr ;
 conditional_expr ::= cond:expr iftrue:expr iffalse:expr ;
 ignore_errors ::= expr ;
 
-constant ::= CLASS_NAME CONSTANT_NAME ;
+constant ::= CLASS_NAME? CONSTANT_NAME ;
 
 instanceof ::= expr class_name ;
 
@@ -122,7 +118,7 @@ post_op ::= variable OP ;
 array ::= array_elem* ;
 array_elem ::= key:expr? is_ref:"&"? val:expr ;
 
-method_invocation ::= target method_name actual_parameter* ;
+method_invocation ::= target? method_name actual_parameter* ;
 method_name ::= METHOD_NAME | reflection ;
 
 actual_parameter ::= is_ref:"&"? expr ;
@@ -503,16 +499,6 @@ public:
 	{
 		this->cast = new Token_cast(new String(cast));
 		this->expr = expr;
-	}
-};
-
-class AST_constant
-{
-public:
-	AST_constant(char* class_name, Token_constant_name* constant_name) 
-	{
-		this->class_name = new Token_class_name(new String(class_name));
-		this->constant_name = constant_name;
 	}
 };
 

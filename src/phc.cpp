@@ -15,9 +15,16 @@
 #include <ltdl.h>
 #include "cmdline.h"
 #include "process_ast/process_ast.h"
+#include "codegen/Lift_functions_and_classes.h"
 #include "codegen/Generate_C.h"
 #include "codegen/Lower_control_flow.h"
-#include "codegen/Prep.h"
+#include "codegen/Lower_expr_flow.h"
+#include "codegen/Shredder.h"
+#include "codegen/Goto_uppering.h"
+#include "codegen/Reorder_functions.h"
+#include "codegen/Check_lowering.h"
+#include "codegen/Check_uppering.h"
+#include "process_ast/Strip_comments.h"
 #include "process_ast/PHP_unparser.h"
 #include "process_ast/XML_unparser.h"
 #include "process_ast/DOT_unparser.h"
@@ -83,129 +90,187 @@ int main(int argc, char** argv)
 		}
 	}
 
+	if(php_script == NULL) return -1;
+
 	// Make sure the inputs cannot be accessed globally
 	args_info.inputs = NULL;
 
-	if(php_script != NULL)
+	process_ast(php_script);
+
+	// lift
+	if(args_info.run_lifting_flag
+		|| args_info.generate_c_flag
+		|| args_info.compile_flag)
 	{
-		process_ast(php_script);
-		run_plugins(php_script);
+		Lift_functions_and_classes lift;
+		php_script->transform_children(&lift);
+	}
 
-		if(args_info.run_lowering_flag)
-		{
-			Lower_control_flow lcf;
-			php_script->transform_children (&lcf);
-		}
+	// reorder
+	if (args_info.run_lowering_flag 
+			|| args_info.run_shredder_flag
+			|| args_info.obfuscate_flag)
+	{
+		Reorder_functions rf;
+		php_script->visit(&rf);
+	}
 
-		if(args_info.dump_php_flag)
-		{
-			PHP_unparser php_unparser;
-			php_script->visit(&php_unparser);
-		}
+	// lower
+	if (args_info.run_lowering_flag 
+			|| args_info.run_shredder_flag
+			|| args_info.obfuscate_flag
+			|| args_info.generate_c_flag
+			|| args_info.compile_flag)
+	{
+		Lower_control_flow lcf;
+		Lower_expr_flow lef;
+		php_script->transform_children (&lcf);
+		php_script->transform_children (&lef);
 
-		if(args_info.dump_ast_xml_flag)
-		{
-			XML_unparser xml_unparser;
-			php_script->visit(&xml_unparser);
-		}
+		Check_lowering cl;
+		php_script->visit (&cl);
+	}
 
-		if(args_info.dump_ast_dot_flag)
-		{
-			DOT_unparser dot_unparser;
-			php_script->visit(&dot_unparser);
-		}
+	// shred
+	if(args_info.run_shredder_flag
+			|| args_info.obfuscate_flag
+			|| args_info.generate_c_flag
+			|| args_info.compile_flag)
+	{
+		Shredder s;
+		php_script->transform_children(&s);
+	}
+
+	// upper
+	if(!args_info.no_goto_uppering_flag
+			&& (args_info.run_lowering_flag
+				|| args_info.run_shredder_flag
+				|| args_info.obfuscate_flag))
+	{
+		Goto_uppering gu;
+		php_script->visit (&gu);
+
+		Check_uppering cl;
+		php_script->visit (&cl);
+	}
+
+	// Strip comments
+	if (args_info.obfuscate_flag)
+	{
+		Strip_comments sc;
+		php_script->visit (&sc);
+	}
+
+	run_plugins(php_script);
+
+	if(args_info.dump_php_flag)
+	{
+		PHP_unparser php_unparser;
+		php_script->visit(&php_unparser);
+	}
+
+	if(args_info.dump_ast_xml_flag)
+	{
+		XML_unparser xml_unparser;
+		php_script->visit(&xml_unparser);
+	}
+
+	if(args_info.dump_ast_dot_flag)
+	{
+		DOT_unparser dot_unparser;
+		php_script->visit(&dot_unparser);
+	}
+	
+	if(args_info.generate_c_flag)
+	{
+		generate_c(php_script);
+	}
+
+	if(args_info.compile_flag)
+	{
+		// Find PHP installation path
+		char* php_path;
+		if(args_info.with_php_given)
+			php_path = args_info.with_php_arg;
+		else
+			php_path = PHP_INSTALL_PATH;
 		
-		if(args_info.generate_c_flag)
+		// Argument array for gcc
+		#define GCC_ARGS 9
+		stringstream args[GCC_ARGS];
+		args[0] << "gcc";
+		args[1] << "-I" << php_path << "/include/php";
+		args[2] << "-I" << php_path << "/include/php/main";
+		args[3] << "-I" << php_path << "/include/php/TSRM";
+		args[4] << "-I" << php_path << "/include/php/Zend";
+		args[5] << "-L" << php_path << "/lib";
+		args[6] << "-lphp5";
+		args[7] << "-xc";
+		args[8] << "-";
+
+		char** argv;
+		argv = (char**) calloc(GCC_ARGS + args_info.c_option_given + 1, sizeof(char*));
+		for(unsigned i = 0; i < GCC_ARGS; i++) 
+			argv[i] = strdup(args[i].str().c_str());
+		for(unsigned i = 0; i < args_info.c_option_given; i++)
+			argv[GCC_ARGS + i] = args_info.c_option_arg[i]; 
+		argv[GCC_ARGS + args_info.c_option_given] = NULL;
+
+		if(args_info.verbose_flag)
 		{
-			generate_c(php_script);
+			for(unsigned i = 0; i < GCC_ARGS + args_info.c_option_given; i++)
+				cout << argv[i] << " ";
+			cout << endl;
 		}
 
-		if(args_info.compile_flag)
+		// Pipe output of Generate_C into gcc
+		int pfd[2];
+		#define READ_END 0
+		#define WRITE_END 1
+		if(pipe(pfd) == -1) 
 		{
-			// Find PHP installation path
-			char* php_path;
-			if(args_info.with_php_given)
-				php_path = args_info.with_php_arg;
-			else
-				php_path = PHP_INSTALL_PATH;
-			
-			// Argument array for gcc
-			#define GCC_ARGS 9
-			stringstream args[GCC_ARGS];
-			args[0] << "gcc";
-			args[1] << "-I" << php_path << "/include/php";
-			args[2] << "-I" << php_path << "/include/php/main";
-			args[3] << "-I" << php_path << "/include/php/TSRM";
-			args[4] << "-I" << php_path << "/include/php/Zend";
-			args[5] << "-L" << php_path << "/lib";
-			args[6] << "-lphp5";
-			args[7] << "-xc";
-			args[8] << "-";
+			cerr << "Could not create pipe" << endl;
+			exit(-1);
+		}
 
-			char** argv;
-			argv = (char**) calloc(GCC_ARGS + args_info.c_option_given + 1, sizeof(char*));
-			for(unsigned i = 0; i < GCC_ARGS; i++) 
-				argv[i] = strdup(args[i].str().c_str());
-			for(unsigned i = 0; i < args_info.c_option_given; i++)
-				argv[GCC_ARGS + i] = args_info.c_option_arg[i]; 
-			argv[GCC_ARGS + args_info.c_option_given] = NULL;
+		int cpid = fork();
+		if(cpid == -1)
+		{
+			cerr << "Could not fork" << endl;
+			exit(-1);
+		}
 
-			if(args_info.verbose_flag)
-			{
-				for(unsigned i = 0; i < GCC_ARGS + args_info.c_option_given; i++)
-					cout << argv[i] << " ";
-				cout << endl;
-			}
+		if(cpid == 0)
+		{
+			// Child (gcc)
+			close(pfd[WRITE_END]);
+			dup2(pfd[READ_END], STDIN_FILENO);
+			execvp("gcc", argv);
+		}
+		else
+		{
+			// Parent (phc)
+			// Backup old stdout
+			int old_stdout = dup(STDOUT_FILENO);
 
-			// Pipe output of Generate_C into gcc
-			int pfd[2];
-			#define READ_END 0
-			#define WRITE_END 1
-			if(pipe(pfd) == -1) 
-			{
-				cerr << "Could not create pipe" << endl;
-				exit(-1);
-			}
+			// Redirect stdout to the pipe
+			close(pfd[READ_END]);
+			dup2(pfd[WRITE_END], STDOUT_FILENO);
 
-			int cpid = fork();
-			if(cpid == -1)
-			{
-				cerr << "Could not fork" << endl;
-				exit(-1);
-			}
+			// Generate C code
+			generate_c(php_script);
+			cout.flush();
 
-			if(cpid == 0)
-			{
-				// Child (gcc)
-				close(pfd[WRITE_END]);
-				dup2(pfd[READ_END], STDIN_FILENO);
-				execvp("gcc", argv);
-			}
-			else
-			{
-				// Parent (phc)
-				// Backup old stdout
-				int old_stdout = dup(STDOUT_FILENO);
+			// Close the pipe into indicate EOF to gcc
+			close(STDOUT_FILENO);
+			close(pfd[WRITE_END]);
 
-				// Redirect stdout to the pipe
-				close(pfd[READ_END]);
-				dup2(pfd[WRITE_END], STDOUT_FILENO);
+			// Wait for gcc to finish
+			waitpid(cpid, NULL, 0);
 
-				// Generate C code
-				generate_c(php_script);
-				cout.flush();
-
-				// Close the pipe into indicate EOF to gcc
-				close(STDOUT_FILENO);
-				close(pfd[WRITE_END]);
-
-				// Wait for gcc to finish
-				waitpid(cpid, NULL, 0);
-
-				// Restore stdout
-				dup(old_stdout);
-				close(old_stdout);
-			}
+			// Restore stdout
+			dup(old_stdout);
+			close(old_stdout);
 		}
 	}
 
@@ -215,15 +280,12 @@ int main(int argc, char** argv)
 void generate_c(AST_php_script* php_script)
 {
 	Generate_C* generate_c;
-	Lower_control_flow lcf;
-	Prep prep;
 
 	if(!args_info.extension_given)
 		generate_c = new Generate_C(NULL);
 	else
 		generate_c = new Generate_C(new String(args_info.extension_arg));
-	php_script->transform_children(&lcf);	
-	php_script->transform_children(&prep);	
+
 	php_script->visit(generate_c);
 }
 

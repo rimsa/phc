@@ -63,6 +63,13 @@ abstract class Test
 		return $string;
 	}
 
+	function homogenize_break_levels ($string)
+	{
+		$string = preg_replace(	"/Fatal error: Cannot break\/continue \d+ level(s)? in .*/",
+										"Fatal error: Too many break/continue levels", $string);
+		return $string;
+	}
+
 	function check_global_prerequisites ()
 	{
 		global $php_exe;
@@ -439,7 +446,7 @@ abstract class Test
 		global $exceptions;
 		if (!isset($exceptions{$this->get_name()})) return false;
 		$array = $exceptions{$this->get_name()};
-		if (!is_array ($array)) return false;
+		assert (is_array ($array));
 		return (in_array ($subject, $array));
 	}
 }

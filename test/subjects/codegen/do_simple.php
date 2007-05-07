@@ -1,5 +1,4 @@
 <?php
-
 	$x = 0;
 	$y = 0;
 	do
@@ -13,5 +12,4 @@
 
 	var_dump ($x);
 	var_dump ($y);
-
 ?>

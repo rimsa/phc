@@ -6,56 +6,72 @@
  * gotos, and add necessary labels.
  */
 
+/* We increase the depth for any statement which works with break and continue.
+ * We decrease it on the way back up. The labels are created by post_break,
+ * stored in the labels stack, and used as necessary. */
+
+// TODO we have to handle iterators too: 
+//   http://www.php.net/manual/en/ref.spl.php
+//   http://ramikayyali.com/archives/2005/02/25/iterators
+
 #include "Lower_control_flow.h"
+#include "fresh.h"
+#include <sstream>
 #include "process_ast/XML_unparser.h"
 
-/* Generate a new unique label */
-AST_label* label ()
+// TODO if obfuscate is set, we should randomly rearrange the basic blocks
+
+#define BREAK_ATTR "phc.codegen.break_label"
+#define CONTINUE_ATTR "phc.codegen.continue_label"
+template <class T>
+const char* get_attr_name ()
 {
-	static int count = 0;
-	stringstream ss;
-	ss << "L" << count;
-	count ++;
-	return new AST_label (new Token_label_name (new String (ss.str ())));
+	if (T::ID == AST_break::ID) return BREAK_ATTR;
+	if (T::ID == AST_continue::ID) return CONTINUE_ATTR;
+	return NULL;
 }
 
-/* Add a comment, generated from DESC and OWNER to NEW */
-#if 0
-void
-add_comment (AST_commented_node* new_node, const char* desc, AST_node* owner)
-{
-	static int comment_number = 0;
 
-	// get a number for the lowered object
-	const char* name = "phc.lowering.number";
-	int number;
-	if (owner->attrs->has (name))
-		number = owner->attrs->get_integer (name)->value ();
-	else
+template<class T> 
+void Lower_control_flow::potentially_add_label (AST_node* in, List<AST_statement*> *out)
+{
+	assert (break_levels.back () == in);
+	assert (continue_levels.back () == in);
+
+	// Not a great way to do this, sorry.
+	const char* attr_name = get_attr_name<T> ();
+	if (!in->attrs->has (attr_name))
+		return;
+
+	AST_label* label = dynamic_cast<AST_label*> (in->attrs->get (attr_name));
+	assert (label != NULL);
+	out->push_back (label);
+}
+
+String* string_for_int (int i)
+{
+	stringstream ss;
+	ss << i;
+	return new String (ss.str ());
+}
+
+// Get IN's exit label, or create one for it, and return it.
+template <class T>
+AST_label* Lower_control_flow::exit_label (AST_node* in)
+{
+	const char* attr_name = get_attr_name <T> ();
+	if (in->attrs->has (attr_name))
 	{
-		number = comment_number;
-		comment_number ++;
-		owner->attrs->set (name, new Integer (number));
+		AST_label *label = dynamic_cast <AST_label*> (in->attrs->get (attr_name));
+		assert (label);
+		return label;
 	}
 
-	stringstream ss;
-	ss << desc << number;
-	String* comment = new String (ss.str ());
-//	new_node->attrs->attrs->set(
-//										 "phc.unparser.comment.after",
-//										 new Boolean(true));
-//	new_node->attrs->set("phc.comments", new List<String*> (comment));
+	AST_label *label = fresh_label ();
+	in->attrs->set (attr_name, label);
+	return label;
 }
-#endif
 
-/* Return a new list of statements, containing a single statement
- * STATEMENT. */
-List<AST_statement*>* wrap (AST_statement* statement)
-{
-	List<AST_statement*>* result = new List<AST_statement*> ();
-	result->push_back (statement);
-	return result;
-}
 
 /* Convert
  *			if ($x) { y (); }
@@ -75,26 +91,22 @@ List<AST_statement*>* wrap (AST_statement* statement)
  * fall-through edge if we negate the condition, but this is more
  * readable and understandable, as it keeps the structure of the original
  * if-else statement. */
-void
-Lower_control_flow::post_if(AST_if* in, List<AST_statement*>* out)
+void Lower_control_flow::lower_if(AST_if* in, List<AST_statement*>* out)
 {
 	// Don't lower them if they're already lowered
-	// TODO this would be easier if there was a new catagory of if
-	AST_label *l1 = label ();
-	AST_label *l2 = label ();
-	AST_label *l3 = label ();
+	AST_label *l1 = fresh_label ();
+	AST_label *l2 = fresh_label ();
+	AST_label *l3 = fresh_label ();
 
 	// create the gotos
-	AST_goto *goto_l1 = new AST_goto (l1->label_name);
-	AST_goto *goto_l2 = new AST_goto (l2->label_name);
 	AST_goto *l1_goto_l3 = new AST_goto (l3->label_name);
 	AST_goto *l2_goto_l3 = new AST_goto (l3->label_name);
 
 	// make the if
-	AST_hir_if *new_if = new AST_hir_if (in->expr, goto_l1, goto_l2);
+	AST_branch *branch = new AST_branch (in->expr, l1->label_name, l2->label_name);
 
 	// generate the code
-	out->push_back (new_if);
+	out->push_back (branch);
 	out->push_back (l1);
 	out->push_back_all (in->iftrue);
 	out->push_back (l1_goto_l3);
@@ -102,6 +114,11 @@ Lower_control_flow::post_if(AST_if* in, List<AST_statement*>* out)
 	out->push_back_all (in->iffalse);
 	out->push_back (l2_goto_l3);
 	out->push_back (l3);
+}
+
+void Lower_control_flow::post_if(AST_if* in, List<AST_statement*>* out)
+{
+	lower_if (in, out);
 }
 
 /* Convert
@@ -115,26 +132,33 @@ Lower_control_flow::post_if(AST_if* in, List<AST_statement*>* out)
  *			goto L0
  *		L2:
  */
-void
-Lower_control_flow::post_while (AST_while* in, List<AST_statement*>* out)
+
+void Lower_control_flow::lower_while (AST_while* in, List<AST_statement*>* out)
 {
-	AST_label *l0 = label ();
-	AST_label *l1 = label ();
-	AST_label *l2 = label ();
+	AST_label *l0 = fresh_label ();
+	AST_label *l1 = fresh_label ();
+	AST_label *l2 = fresh_label ();
 	AST_goto *goto_l0 = new AST_goto (l0->label_name);
-	AST_goto *goto_l1 = new AST_goto (l1->label_name);
-	AST_goto *goto_l2 = new AST_goto (l2->label_name);
 
 	// create the if statement
-	AST_hir_if *if_stmt = new AST_hir_if (in->expr, goto_l1, goto_l2);
+	AST_branch *branch = new AST_branch (in->expr, l1->label_name, l2->label_name);
 
 	// generate code
 	out->push_back (l0);
-	out->push_back (if_stmt);
+	out->push_back (branch);
 	out->push_back (l1);
 	out->push_back_all (in->statements);
 	out->push_back (goto_l0);
 	out->push_back (l2);
+}
+
+void Lower_control_flow::post_while (AST_while* in, List<AST_statement*>* out)
+{
+	potentially_add_label<AST_continue> (in, out);
+	lower_while (in, out);
+	potentially_add_label<AST_break> (in, out);
+	break_levels.pop_back ();
+	continue_levels.pop_back ();
 }
 
 /* Convert
@@ -147,22 +171,28 @@ Lower_control_flow::post_while (AST_while* in, List<AST_statement*>* out)
  *			else goto L2:
  *		L2:
  */
-void
-Lower_control_flow::post_do (AST_do* in, List<AST_statement*>* out)
+void Lower_control_flow::lower_do (AST_do* in, List<AST_statement*>* out)
 {
-	AST_label* l1 = label ();
-	AST_label* l2 = label ();
-	AST_goto* goto_l1 = new AST_goto (l1->label_name);
-	AST_goto* goto_l2 = new AST_goto (l2->label_name);
+	AST_label* l1 = fresh_label ();
+	AST_label* l2 = fresh_label ();
 
 	// make the if
-	AST_hir_if* if_stmt = new AST_hir_if (in->expr, goto_l1, goto_l2);
+	AST_branch* branch = new AST_branch (in->expr, l1->label_name, l2->label_name);
 
 	// generate the code
 	out->push_back (l1);
 	out->push_back_all (in->statements);
-	out->push_back (if_stmt);
+	out->push_back (branch);
 	out->push_back (l2);
+}
+
+void Lower_control_flow::post_do (AST_do* in, List<AST_statement*>* out)
+{
+	potentially_add_label<AST_continue> (in, out);
+	lower_do (in, out);
+	potentially_add_label<AST_break> (in, out);
+	break_levels.pop_back ();
+	continue_levels.pop_back ();
 }
 
 /* Convert
@@ -185,44 +215,165 @@ Lower_control_flow::post_do (AST_do* in, List<AST_statement*>* out)
  *				i++;
  *			}
  *	which is then lowered by post_while. */
-void
-Lower_control_flow::post_for (AST_for* in, List<AST_statement*>* out)
+
+void Lower_control_flow::lower_for (AST_for* in, List<AST_statement*>* out)
 {
 	// these are expressions, which arent statements, so they need to be wrapped
 	AST_statement* init = new AST_eval_expr (in->init);
 	AST_statement* incr = new AST_eval_expr (in->incr);
 
+	if (in->cond == NULL) 
+		in->cond = new Token_bool (true, new String ("true"));
+
 	// create the while
 	AST_while *while_stmt = new AST_while (in->cond, in->statements);
+
+	// A continue in a for loop lands just before the increment
+	potentially_add_label<AST_continue> (in, while_stmt->statements);
 	while_stmt->statements->push_back (incr);
-	List<AST_statement*> *lowered_while = transform_statement (while_stmt);
 
 	// push it all back
 	out->push_back (init);
-	out->push_back_all (lowered_while);
+	lower_while (while_stmt, out);
 }
 
-/* Foreach looks complicated. Theoretically, you could replace it with
- *		reset ($array)
- *		while (current ($array))
- *		{
- *			$x = current ($array);
- *			...
- *			next ($array);
- *		}
- * but it seems from looking at the PHP opcodes that the internal iterator
- * (why?!?) needs locks acquired, which makes sense. I'll return to this later
- * */
-void 
-Lower_control_flow::post_foreach(AST_foreach* in, List<AST_statement*>* out)
+void Lower_control_flow::post_for (AST_for* in, List<AST_statement*>* out)
 {
-	out->push_back (in);
+	lower_for (in, out);
+	// we add the continue label in lower_for
+	potentially_add_label<AST_break> (in, out);
+	break_levels.pop_back ();
+	continue_levels.pop_back ();
+}
+
+/* Convert 
+ *   foreach ($array as $key => $value)
+ *   {
+ *		 ...;
+ *   }
+ * into
+ *	  $temp_array = $array; // copies the array, implicit reset
+ *	  unset ($value);
+ *	  while (list ($Tkey, ) = each ($temp_array))
+ *	  {
+ *	   $key =& $Tkey;
+ *		$value = $temp_array [$Tkey];
+ *		 ...
+ *	  }
+ *	
+ *	However, if we use references, we convert
+ *   foreach ($array as $key => &$value)
+ *   {
+ *		 ...;
+ *   }
+ * into
+ *	  $temp_array = $array; // same array, only evaluate expr once
+ *	  reset ($temp_array)
+ *	  unset ($value);
+ *	  while (list ($key, ) = each ($temp_array))
+ *	  {
+ *		$value =& $temp_array [$key];
+ *		 ...
+ *	  }
+ *
+ *	In the referenced version, at the end of an iteration, $value still refers
+ *	to the last data element in $array.
+ * */
+
+void Lower_control_flow::lower_foreach (AST_foreach* in, List<AST_statement*>* out)
+{
+	AST_variable* temp_array = fresh_var ("LCF_a");
+
+	// if no key is provided, use a temporary
+	AST_variable* Tkey;
+	if (in->key) Tkey = in->key;
+	else Tkey = fresh_var ("LCF_k");
+
+	// $temp_array =& $array or $temp_array = $array;
+	//
+	// TODO the nested loops problem is associated with this. Messing with this changes the results substantially
+	// TODO i suspect reset is also involved. My code does what I think is required, but PHPs doesnt.
+	AST_eval_expr* copy = new AST_eval_expr (
+		new AST_assignment (temp_array, in->is_ref, in->expr));
+	AST_eval_expr* reset = NULL;
+	if (in->is_ref)
+	{
+		// reset ($temp_array);
+		List<AST_actual_parameter*> *reset_params 
+			= new List<AST_actual_parameter*> ();
+		reset_params->push_back (new AST_actual_parameter (false, temp_array));
+		reset = new AST_eval_expr (
+					new AST_method_invocation (NULL, 
+						new Token_method_name (new String ("reset")),
+						reset_params)
+				);
+	}
+
+	// unset ($value);
+	List<AST_actual_parameter*> *unset_params = new List<AST_actual_parameter*> ();
+	unset_params->push_back (new AST_actual_parameter (false, in->val));
+	AST_eval_expr* unset = new AST_eval_expr (
+			new AST_method_invocation (NULL, 
+				new Token_method_name (new String ("unset")),
+				unset_params)
+			);
+
+
+	// each ($temp_array)
+	List<AST_actual_parameter*> *each_params 
+		= new List<AST_actual_parameter*> ();
+	each_params->push_back (new AST_actual_parameter (false, temp_array));
+	AST_method_invocation *each = new AST_method_invocation (NULL, 
+			new Token_method_name (new String ("each")),
+			each_params);
+
+	// list ($key, ) = each ($temp_array);
+	List<AST_list_element*> *lhss = new List< AST_list_element*> ();
+	lhss->push_back (Tkey);
+	AST_list_assignment *assign = new AST_list_assignment (lhss, each);
+
+	// $value = $temp_array [$Tkey]
+	// or
+	// $value =& $temp_array [$Tkey]
+	List<AST_expr*> *indices = new List<AST_expr*> ();
+	indices->push_back (Tkey);
+	AST_variable *val = new AST_variable (NULL, temp_array->variable_name, indices);
+	AST_assignment *fetch_val = new AST_assignment (in->val, in->is_ref, val);
+	in->statements->push_front (new AST_eval_expr (fetch_val));
+
+	// while (list ($key, ) = each ($temp_array))
+   AST_while* while_stmt = new AST_while (assign, in->statements);
+
+	// A continue in a for loop lands just before the increment
+	potentially_add_label<AST_continue> (in, while_stmt->statements);
+
+	// push it all back
+	out->push_back (copy);
+	if (reset) out->push_back (reset);
+//	out->push_back (unset);
+	lower_while (while_stmt, out);
+}
+
+void Lower_control_flow::post_foreach(AST_foreach* in, List<AST_statement*>* out)
+{
+	lower_foreach (in, out);
+	// we add the continue label in lower_foreach
+	potentially_add_label<AST_continue> (in, out);
+	potentially_add_label<AST_break> (in, out);
+	break_levels.pop_back ();
+	continue_levels.pop_back ();
 }
 
 /* Switch is a little complicated aswell. In theory, it would be nice to
  * convert this to a jump table in the generated code, but we can't really do
  * that with the C output. We could use GCC extensions, but we probably dont
- * want to go down that road. So we'll convert this to nested if's.
+ * want to go down that road. So we'll convert this to simple if's.
+ *
+ * Note that the blocks always fall-through. We will rely on a break
+ * transform to escape the blocks.
+ *
+ * These need to e separated since the default must be after the last
+ * comparison, but must fall through in the specified order.
  *
  * Convert
  *		switch (expr)
@@ -231,72 +382,244 @@ Lower_control_flow::post_foreach(AST_foreach* in, List<AST_statement*>* out)
  *				x1 ();
  *			case expr2:
  *				x2 ();
+ *				break;
  *			...
  *			default exprD:
  *				xD ();
+ *
+ *			case expr3:
+ *				x3 ();
  *		}
  *
  *	into
  *		val = expr;
- *		if (expr == expr1) goto L1
- *		else if (expr == expr2) goto L2
- *		...
- *		else goto
- * TODO finish this
- *			
- */	
-void 
-Lower_control_flow::post_switch(AST_switch* in, List<AST_statement*>* out)
+ *		if (expr == expr1) goto L1; else goto N1;
+ *	N1:
+ *		if (expr == expr2) goto L2; else goto N2;
+ *	N2:
+ *		if (expr == expr3) goto L3; else goto N3;
+ *	N3:
+ *		goto LD;
+ *	L1:
+ *		x1 ();
+ *		goto L2;
+ *	L2:
+ *		x2 ();
+ *		break; // to become goto LE
+ *		goto LD;
+ *	LD:
+ *		xD ();
+ *		goto L3;
+ *	L3:
+ *		x3 ();
+ *		goto LE:
+ *	LE:
+ *
+ */
+
+void Lower_control_flow::lower_switch(AST_switch* in, List<AST_statement*>* out)
 {
+	// val = expr;
+	AST_variable *lhs = fresh_var ("TL");
+	AST_assignment* assign = new AST_assignment (lhs, false, in->expr);
+	out->push_back (new AST_eval_expr (assign));
+
+	List<AST_statement*> *branches = new List<AST_statement*> ();
+	List<AST_statement*> *blocks = new List<AST_statement*> ();
+
+	List<AST_switch_case*> *cases = in->switch_cases;
+	List<AST_switch_case*>::const_iterator i;
+
+	// we need to know the header of the next block ahead of time
+	AST_label* next_block_header = fresh_label ();
+	AST_goto* _default = NULL;
+	for (i = cases->begin (); i != cases->end (); i++)
+	{
+		AST_label* header = next_block_header;
+		next_block_header = fresh_label ();
+
+		if ((*i)->expr == NULL) // default
+		{
+			assert (_default == NULL);
+			_default = new AST_goto (header->label_name);
+		}
+		else
+		{
+			// the else branch just goes to the next line. We dont allow NULL else
+			// statements (perhaps we should?).
+			AST_label* next = fresh_label ();
+
+			// make the comparison
+			Token_op* op = new Token_op (new String ("=="));
+			AST_expr* compare = new AST_bin_op (lhs->clone (), op, (*i)->expr);
+			AST_branch* branch = new AST_branch (compare, header->label_name, next->label_name);
+
+			branches->push_back (branch);
+			branches->push_back (next);
+		}
+
+		blocks->push_back (header);
+		blocks->push_back_all ((*i)->statements);
+		blocks->push_back (new AST_goto (next_block_header->label_name)); // fallthrough
+	}
+	blocks->push_back (next_block_header);
+
+	if (_default) 
+		branches->push_back (_default);
+	else // if default is blank jump to the end
+		branches->push_back (new AST_goto (next_block_header->label_name));
+
+	out->push_back_all (branches);
+	out->push_back_all (blocks);
+}
+
+void Lower_control_flow::post_switch(AST_switch* in, List<AST_statement*>* out)
+{
+	lower_switch (in, out);
+	// A continue is the same as a break, so add the label at the same place
+	potentially_add_label<AST_continue> (in, out);
+	potentially_add_label<AST_break> (in, out);
+	break_levels.pop_back ();
+	continue_levels.pop_back ();
+}
+
+/* Transform:
+ *		break $x;
+ *	into:
+ *		$TB1 = $x;
+ *		if ($TB1 = 1) goto L1; else goto L2;
+ *	L2:
+ *		if ($TB1 = 2) goto L3; else goto L4;
+ *	L4:
+ *		if ($TB1 = 3) goto L5; else goto L6;
+ *	L6:
+ *		if ($TB1 = 4) goto L7; else goto L8;
+ *	L8:
+ *
+ *	where L(2n) is the label at the end of the nth inner loop construct
+ */
+void Lower_control_flow::post_break (AST_break* in, List<AST_statement*>* out)
+{
+	lower_exit<AST_break> (in, out);
+}
+
+void Lower_control_flow::post_continue (AST_continue* in, List<AST_statement*>* out)
+{
+	lower_exit<AST_continue> (in, out);
+}
+
+template <class T>
+void Lower_control_flow::lower_exit (T* in, List<AST_statement*>* out)
+{
+	/* If this break has a NULL expression, it's much easier (and gives more
+	 * readable output) if we special case it. Also, break 0 is the same as
+	 * break 1, which is the same as just break. Its easier to handle it all
+	 * together. */
+	List<AST_node*> *levels; // It gets uglier
+	if (AST_break::ID == in->ID) levels = &break_levels;
+	if (AST_continue::ID == in->ID) levels = &continue_levels;
+	assert (levels);
+	if (levels->size ())
+	{
+
+		Token_int *_int = dynamic_cast<Token_int*> (in);
+		if (in->expr == NULL || (_int && _int->value <= 1))
+		{
+			// Create a label, pushback a goto to it, and attach it as an attribute
+			// of the innermost looping construct.
+			AST_node* level = levels->back ();
+
+			AST_label *target = exit_label<T> (level);
+			AST_goto *exit = new AST_goto (target->label_name);
+			out->push_back (exit);
+		}
+		else
+		{
+			// Otherwise we create a label and a goto for each possible loop, and attach
+			// the label it the loop.
+
+			// Since we compare to the expression, we need to create a variable for it.
+			AST_variable *lhs = fresh_var ("TB");
+			AST_assignment* assign = new AST_assignment (lhs, false, in->expr);
+			out->push_back (new AST_eval_expr (assign));
+
+			// 1 branch and label per level:
+			//		if ($TB1 = 1) goto L1; else goto L2;
+			//	L2:
+			List<AST_node*>::reverse_iterator i;
+			unsigned int depth = 1;
+			for (i = levels->rbegin (); i != levels->rend (); i++)
+			{
+				// FYI: Objects/strings evaluate to 0
+				AST_node* level = (*i);
+
+				// Attach the break target to the loop construct.
+				AST_label* iftrue = exit_label<T> (level);
+
+				// Create: if ($TB1 == depth)
+				Token_op* op = new Token_op (new String ("=="));
+				Token_int* branch_num = new Token_int (depth, string_for_int (depth));
+				AST_bin_op* compare = new AST_bin_op (lhs->clone (), op, branch_num);
+
+				// We break to depth 1 for any expr <= 1
+				if (depth == 1)
+					compare->op = new Token_op (new String ("<="));
+
+				AST_label* iffalse = fresh_label ();
+				AST_branch* branch = new AST_branch (compare, iftrue->label_name, iffalse->label_name);
+
+				out->push_back (branch);
+				out->push_back (iffalse);
+				depth ++;
+			}
+			assert (depth == break_levels.size () + 1);
+		}
+	}
+
+	// Add a failure condition if the user tries to break too far
+	// TODO: Not exactly what PHP does, but a decent first attempt
+	AST_method_name* name = new Token_method_name (new String ("die"));
+	List<AST_actual_parameter*> *params = new List<AST_actual_parameter*> ();
+	String* error_string = 
+		new String ("\nFatal error: Too many break/continue levels\n");
+	AST_actual_parameter* param = 
+		new AST_actual_parameter (false, new Token_string (error_string, error_string));
+	params->push_back (param);
+	out->push_back (new AST_eval_expr (new AST_method_invocation (NULL, name, params)));
+}
+
+
+void Lower_control_flow::pre_while(AST_while* in, List<AST_statement*>* out)
+{
+	break_levels.push_back (in);
+	continue_levels.push_back (in);
 	out->push_back (in);
 }
 
-
-void 
-Lower_control_flow::post_switch_case(AST_switch_case* in, List<AST_switch_case*>* out)
+void Lower_control_flow::pre_do(AST_do* in, List<AST_statement*>* out)
 {
+	break_levels.push_back (in);
+	continue_levels.push_back (in);
 	out->push_back (in);
 }
 
-
-void 
-Lower_control_flow::post_break(AST_break* in, List<AST_statement*>* out)
+void Lower_control_flow::pre_for(AST_for* in, List<AST_statement*>* out)
 {
+	break_levels.push_back (in);
+	continue_levels.push_back (in);
 	out->push_back (in);
 }
 
-
-void 
-Lower_control_flow::post_continue(AST_continue* in, List<AST_statement*>* out)
+void Lower_control_flow::pre_foreach(AST_foreach* in, List<AST_statement*>* out)
 {
+	break_levels.push_back (in);
+	continue_levels.push_back (in);
 	out->push_back (in);
 }
 
-
-void 
-Lower_control_flow::post_try(AST_try* in, List<AST_statement*>* out)
+void Lower_control_flow::pre_switch(AST_switch* in, List<AST_statement*>* out)
 {
+	break_levels.push_back (in);
+	continue_levels.push_back (in);
 	out->push_back (in);
 }
-
-
-void 
-Lower_control_flow::post_catch(AST_catch* in, List<AST_catch*>* out)
-{
-	out->push_back (in);
-}
-
-
-void 
-Lower_control_flow::post_throw(AST_throw* in, List<AST_statement*>* out)
-{
-	out->push_back (in);
-}
-
-
-AST_expr*
-Lower_control_flow::post_conditional_expr(AST_conditional_expr* in)
-{
-	return in;
-}
-

@@ -35,6 +35,7 @@ protected:
 	void newline();
 	void output_tabs();
 	void empty_line();
+	void space_or_newline();
 
 public:
 	void children_php_script(AST_php_script* in);
@@ -49,7 +50,6 @@ public:
 	void children_attribute(AST_attribute* in);
 	void children_attr_mod(AST_attr_mod* in);
 	void children_if(AST_if* in);
-	void children_hir_if(AST_hir_if* in);
 	void children_while(AST_while* in);
 	void children_do(AST_do* in);
 	void children_for(AST_for* in);
@@ -60,16 +60,17 @@ public:
 	void children_continue(AST_continue* in);
 	void children_return(AST_return* in);
 	void children_static_declaration(AST_static_declaration* in);
+	void children_global(AST_global* in);
 	void children_unset(AST_unset* in);
 	void children_declare(AST_declare* in);
 	void children_directive(AST_directive* in);
 	void children_try(AST_try* in);
 	void children_catch(AST_catch* in);
+	void post_catch_chain(AST_catch* in);
 	void children_throw(AST_throw* in);
 	void children_eval_expr(AST_eval_expr* in);
 	void children_assignment(AST_assignment* in);
 	void children_list_assignment(AST_list_assignment* in);
-	void children_list_elements(AST_list_elements* in);
 	void children_cast(AST_cast* in);
 	void children_unary_op(AST_unary_op* in);
 	void children_bin_op(AST_bin_op* in);
@@ -87,6 +88,7 @@ public:
 	void children_actual_parameter(AST_actual_parameter* in);
 	void children_new(AST_new* in);
 	void children_clone(AST_clone* in);
+	void children_branch (AST_branch* in);
 	void children_goto(AST_goto* in);
 	void children_label(AST_label* in);
 	void children_interface_name(Token_interface_name* in);

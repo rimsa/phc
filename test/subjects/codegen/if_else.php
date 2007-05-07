@@ -1,5 +1,4 @@
 <?php
-
 	$x = 0;
 	// the simplest of statements is the if statement
 	if ($x == 7)

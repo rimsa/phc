@@ -15,6 +15,21 @@
 
 class Generate_C : public AST_visitor
 {
+public:
+	// use NULL to compile as an extension
+	Generate_C(String* extension_name);
+
+public:
+	void children_statement(AST_statement* in);
+	void pre_php_script(AST_php_script* in);
+	void post_php_script(AST_php_script* in);
+
+public:
+	String* extension_name;
+	bool is_extension;
+	List<String*>* methods;	// List of all methods compiled	
+
+/*
 private:
 	String* extension_name;
 	bool is_extension;
@@ -27,8 +42,6 @@ private:
 	void update_hash(AST_variable* var, String* val);
 	void index_hash(AST_variable* in);
 	void separate(AST_variable* var);
-	void start_method (String* name, List<AST_formal_parameter*>* parameters);
-	void end_method ();
 
 public:
 	// use NULL to compile as an extension
@@ -47,7 +60,7 @@ public:
 	void post_unset(AST_unset* in);
 	void post_assignment(AST_assignment* in);
 	void children_if(AST_if* in);
-	void children_hir_if(AST_hir_if* in);
+	void children_branch(AST_branch* in);
 	void children_for(AST_for* in);
 	void post_variable(AST_variable* in);
 	void pre_method(AST_method* in);
@@ -57,6 +70,7 @@ public:
 	void children_eval_expr(AST_eval_expr* in);
 	void children_goto (AST_goto* in);
 	void children_label (AST_label* in);
+*/
 };
 
 #endif // GENERATE_C

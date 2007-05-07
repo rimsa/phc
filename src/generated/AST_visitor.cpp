@@ -96,11 +96,23 @@ void AST_visitor::pre_return(AST_return* in)
 {
 }
 
-void AST_visitor::pre_hir_if(AST_hir_if* in)
+void AST_visitor::pre_branch(AST_branch* in)
+{
+}
+
+void AST_visitor::pre_goto(AST_goto* in)
+{
+}
+
+void AST_visitor::pre_label(AST_label* in)
 {
 }
 
 void AST_visitor::pre_static_declaration(AST_static_declaration* in)
+{
+}
+
+void AST_visitor::pre_global(AST_global* in)
 {
 }
 
@@ -136,14 +148,6 @@ void AST_visitor::pre_nop(AST_nop* in)
 {
 }
 
-void AST_visitor::pre_goto(AST_goto* in)
-{
-}
-
-void AST_visitor::pre_label(AST_label* in)
-{
-}
-
 void AST_visitor::pre_expr(AST_expr* in)
 {
 }
@@ -160,11 +164,11 @@ void AST_visitor::pre_list_assignment(AST_list_assignment* in)
 {
 }
 
-void AST_visitor::pre_list_elements(AST_list_elements* in)
+void AST_visitor::pre_list_element(AST_list_element* in)
 {
 }
 
-void AST_visitor::pre_list_element(AST_list_element* in)
+void AST_visitor::pre_nested_list_elements(AST_nested_list_elements* in)
 {
 }
 
@@ -280,11 +284,11 @@ void AST_visitor::pre_variable_name(Token_variable_name* in)
 {
 }
 
-void AST_visitor::pre_directive_name(Token_directive_name* in)
+void AST_visitor::pre_label_name(Token_label_name* in)
 {
 }
 
-void AST_visitor::pre_label_name(Token_label_name* in)
+void AST_visitor::pre_directive_name(Token_directive_name* in)
 {
 }
 
@@ -412,11 +416,23 @@ void AST_visitor::post_return(AST_return* in)
 {
 }
 
-void AST_visitor::post_hir_if(AST_hir_if* in)
+void AST_visitor::post_branch(AST_branch* in)
+{
+}
+
+void AST_visitor::post_goto(AST_goto* in)
+{
+}
+
+void AST_visitor::post_label(AST_label* in)
 {
 }
 
 void AST_visitor::post_static_declaration(AST_static_declaration* in)
+{
+}
+
+void AST_visitor::post_global(AST_global* in)
 {
 }
 
@@ -452,14 +468,6 @@ void AST_visitor::post_nop(AST_nop* in)
 {
 }
 
-void AST_visitor::post_goto(AST_goto* in)
-{
-}
-
-void AST_visitor::post_label(AST_label* in)
-{
-}
-
 void AST_visitor::post_expr(AST_expr* in)
 {
 }
@@ -476,11 +484,11 @@ void AST_visitor::post_list_assignment(AST_list_assignment* in)
 {
 }
 
-void AST_visitor::post_list_elements(AST_list_elements* in)
+void AST_visitor::post_list_element(AST_list_element* in)
 {
 }
 
-void AST_visitor::post_list_element(AST_list_element* in)
+void AST_visitor::post_nested_list_elements(AST_nested_list_elements* in)
 {
 }
 
@@ -596,11 +604,11 @@ void AST_visitor::post_variable_name(Token_variable_name* in)
 {
 }
 
-void AST_visitor::post_directive_name(Token_directive_name* in)
+void AST_visitor::post_label_name(Token_label_name* in)
 {
 }
 
-void AST_visitor::post_label_name(Token_label_name* in)
+void AST_visitor::post_directive_name(Token_directive_name* in)
 {
 }
 
@@ -780,17 +788,32 @@ void AST_visitor::children_return(AST_return* in)
     visit_expr(in->expr);
 }
 
-void AST_visitor::children_hir_if(AST_hir_if* in)
+void AST_visitor::children_branch(AST_branch* in)
 {
     visit_expr(in->expr);
-    visit_goto(in->iftrue);
-    visit_goto(in->iffalse);
+    visit_label_name(in->iftrue);
+    visit_label_name(in->iffalse);
+}
+
+void AST_visitor::children_goto(AST_goto* in)
+{
+    visit_label_name(in->label_name);
+}
+
+void AST_visitor::children_label(AST_label* in)
+{
+    visit_label_name(in->label_name);
 }
 
 void AST_visitor::children_static_declaration(AST_static_declaration* in)
 {
     visit_variable_name(in->variable_name);
     visit_expr(in->expr);
+}
+
+void AST_visitor::children_global(AST_global* in)
+{
+    visit_variable_name(in->variable_name);
 }
 
 void AST_visitor::children_unset(AST_unset* in)
@@ -837,16 +860,6 @@ void AST_visitor::children_nop(AST_nop* in)
 {
 }
 
-void AST_visitor::children_goto(AST_goto* in)
-{
-    visit_label_name(in->label_name);
-}
-
-void AST_visitor::children_label(AST_label* in)
-{
-    visit_label_name(in->label_name);
-}
-
 void AST_visitor::children_assignment(AST_assignment* in)
 {
     visit_variable(in->variable);
@@ -856,11 +869,11 @@ void AST_visitor::children_assignment(AST_assignment* in)
 
 void AST_visitor::children_list_assignment(AST_list_assignment* in)
 {
-    visit_list_elements(in->list_elements);
+    visit_list_element_list(in->list_elements);
     visit_expr(in->expr);
 }
 
-void AST_visitor::children_list_elements(AST_list_elements* in)
+void AST_visitor::children_nested_list_elements(AST_nested_list_elements* in)
 {
     visit_list_element_list(in->list_elements);
 }
@@ -984,11 +997,11 @@ void AST_visitor::children_variable_name(Token_variable_name* in)
 {
 }
 
-void AST_visitor::children_directive_name(Token_directive_name* in)
+void AST_visitor::children_label_name(Token_label_name* in)
 {
 }
 
-void AST_visitor::children_label_name(Token_label_name* in)
+void AST_visitor::children_directive_name(Token_directive_name* in)
 {
 }
 
@@ -1178,12 +1191,28 @@ void AST_visitor::pre_return_chain(AST_return* in)
     pre_return(in);
 }
 
-void AST_visitor::pre_hir_if_chain(AST_hir_if* in)
+void AST_visitor::pre_branch_chain(AST_branch* in)
 {
     pre_node(in);
     pre_commented_node(in);
     pre_statement(in);
-    pre_hir_if(in);
+    pre_branch(in);
+}
+
+void AST_visitor::pre_goto_chain(AST_goto* in)
+{
+    pre_node(in);
+    pre_commented_node(in);
+    pre_statement(in);
+    pre_goto(in);
+}
+
+void AST_visitor::pre_label_chain(AST_label* in)
+{
+    pre_node(in);
+    pre_commented_node(in);
+    pre_statement(in);
+    pre_label(in);
 }
 
 void AST_visitor::pre_static_declaration_chain(AST_static_declaration* in)
@@ -1192,6 +1221,14 @@ void AST_visitor::pre_static_declaration_chain(AST_static_declaration* in)
     pre_commented_node(in);
     pre_statement(in);
     pre_static_declaration(in);
+}
+
+void AST_visitor::pre_global_chain(AST_global* in)
+{
+    pre_node(in);
+    pre_commented_node(in);
+    pre_statement(in);
+    pre_global(in);
 }
 
 void AST_visitor::pre_unset_chain(AST_unset* in)
@@ -1255,22 +1292,6 @@ void AST_visitor::pre_nop_chain(AST_nop* in)
     pre_nop(in);
 }
 
-void AST_visitor::pre_goto_chain(AST_goto* in)
-{
-    pre_node(in);
-    pre_commented_node(in);
-    pre_statement(in);
-    pre_goto(in);
-}
-
-void AST_visitor::pre_label_chain(AST_label* in)
-{
-    pre_node(in);
-    pre_commented_node(in);
-    pre_statement(in);
-    pre_label(in);
-}
-
 void AST_visitor::pre_assignment_chain(AST_assignment* in)
 {
     pre_node(in);
@@ -1287,11 +1308,11 @@ void AST_visitor::pre_list_assignment_chain(AST_list_assignment* in)
     pre_list_assignment(in);
 }
 
-void AST_visitor::pre_list_elements_chain(AST_list_elements* in)
+void AST_visitor::pre_nested_list_elements_chain(AST_nested_list_elements* in)
 {
     pre_node(in);
     pre_list_element(in);
-    pre_list_elements(in);
+    pre_nested_list_elements(in);
 }
 
 void AST_visitor::pre_cast_chain(AST_cast* in)
@@ -1460,18 +1481,18 @@ void AST_visitor::pre_variable_name_chain(Token_variable_name* in)
     pre_variable_name(in);
 }
 
-void AST_visitor::pre_directive_name_chain(Token_directive_name* in)
-{
-    pre_node(in);
-    pre_identifier(in);
-    pre_directive_name(in);
-}
-
 void AST_visitor::pre_label_name_chain(Token_label_name* in)
 {
     pre_node(in);
     pre_identifier(in);
     pre_label_name(in);
+}
+
+void AST_visitor::pre_directive_name_chain(Token_directive_name* in)
+{
+    pre_node(in);
+    pre_identifier(in);
+    pre_directive_name(in);
 }
 
 void AST_visitor::pre_int_chain(Token_int* in)
@@ -1694,9 +1715,25 @@ void AST_visitor::post_return_chain(AST_return* in)
     post_node(in);
 }
 
-void AST_visitor::post_hir_if_chain(AST_hir_if* in)
+void AST_visitor::post_branch_chain(AST_branch* in)
 {
-    post_hir_if(in);
+    post_branch(in);
+    post_statement(in);
+    post_commented_node(in);
+    post_node(in);
+}
+
+void AST_visitor::post_goto_chain(AST_goto* in)
+{
+    post_goto(in);
+    post_statement(in);
+    post_commented_node(in);
+    post_node(in);
+}
+
+void AST_visitor::post_label_chain(AST_label* in)
+{
+    post_label(in);
     post_statement(in);
     post_commented_node(in);
     post_node(in);
@@ -1705,6 +1742,14 @@ void AST_visitor::post_hir_if_chain(AST_hir_if* in)
 void AST_visitor::post_static_declaration_chain(AST_static_declaration* in)
 {
     post_static_declaration(in);
+    post_statement(in);
+    post_commented_node(in);
+    post_node(in);
+}
+
+void AST_visitor::post_global_chain(AST_global* in)
+{
+    post_global(in);
     post_statement(in);
     post_commented_node(in);
     post_node(in);
@@ -1771,22 +1816,6 @@ void AST_visitor::post_nop_chain(AST_nop* in)
     post_node(in);
 }
 
-void AST_visitor::post_goto_chain(AST_goto* in)
-{
-    post_goto(in);
-    post_statement(in);
-    post_commented_node(in);
-    post_node(in);
-}
-
-void AST_visitor::post_label_chain(AST_label* in)
-{
-    post_label(in);
-    post_statement(in);
-    post_commented_node(in);
-    post_node(in);
-}
-
 void AST_visitor::post_assignment_chain(AST_assignment* in)
 {
     post_assignment(in);
@@ -1803,9 +1832,9 @@ void AST_visitor::post_list_assignment_chain(AST_list_assignment* in)
     post_node(in);
 }
 
-void AST_visitor::post_list_elements_chain(AST_list_elements* in)
+void AST_visitor::post_nested_list_elements_chain(AST_nested_list_elements* in)
 {
-    post_list_elements(in);
+    post_nested_list_elements(in);
     post_list_element(in);
     post_node(in);
 }
@@ -1976,16 +2005,16 @@ void AST_visitor::post_variable_name_chain(Token_variable_name* in)
     post_node(in);
 }
 
-void AST_visitor::post_directive_name_chain(Token_directive_name* in)
+void AST_visitor::post_label_name_chain(Token_label_name* in)
 {
-    post_directive_name(in);
+    post_label_name(in);
     post_identifier(in);
     post_node(in);
 }
 
-void AST_visitor::post_label_name_chain(Token_label_name* in)
+void AST_visitor::post_directive_name_chain(Token_directive_name* in)
 {
-    post_label_name(in);
+    post_directive_name(in);
     post_identifier(in);
     post_node(in);
 }
@@ -2296,15 +2325,27 @@ void AST_visitor::visit_switch_case(AST_switch_case* in)
     }
 }
 
-void AST_visitor::visit_goto(AST_goto* in)
+void AST_visitor::visit_label_name(Token_label_name* in)
 {
     if(in == NULL)
-    	visit_null("AST_goto");
+    	visit_null("Token_label_name");
     else
     {
-    	pre_goto_chain(in);
-    	children_goto(in);
-    	post_goto_chain(in);
+    	pre_label_name_chain(in);
+    	children_label_name(in);
+    	post_label_name_chain(in);
+    }
+}
+
+void AST_visitor::visit_variable_name(AST_variable_name* in)
+{
+    if(in == NULL)
+    	visit_null("AST_variable_name");
+    else
+    {
+    	pre_variable_name_chain(in);
+    	children_variable_name(in);
+    	post_variable_name_chain(in);
     }
 }
 
@@ -2365,30 +2406,6 @@ void AST_visitor::visit_catch(AST_catch* in)
     	pre_catch_chain(in);
     	children_catch(in);
     	post_catch_chain(in);
-    }
-}
-
-void AST_visitor::visit_label_name(Token_label_name* in)
-{
-    if(in == NULL)
-    	visit_null("Token_label_name");
-    else
-    {
-    	pre_label_name_chain(in);
-    	children_label_name(in);
-    	post_label_name_chain(in);
-    }
-}
-
-void AST_visitor::visit_list_elements(AST_list_elements* in)
-{
-    if(in == NULL)
-    	visit_null("AST_list_elements");
-    else
-    {
-    	pre_list_elements_chain(in);
-    	children_list_elements(in);
-    	post_list_elements_chain(in);
     }
 }
 
@@ -2473,18 +2490,6 @@ void AST_visitor::visit_target(AST_target* in)
     	pre_target_chain(in);
     	children_target(in);
     	post_target_chain(in);
-    }
-}
-
-void AST_visitor::visit_variable_name(AST_variable_name* in)
-{
-    if(in == NULL)
-    	visit_null("AST_variable_name");
-    else
-    {
-    	pre_variable_name_chain(in);
-    	children_variable_name(in);
-    	post_variable_name_chain(in);
     }
 }
 
@@ -2623,6 +2628,9 @@ void AST_visitor::pre_statement_chain(AST_statement* in)
     case AST_static_declaration::ID:
     	pre_static_declaration_chain(dynamic_cast<AST_static_declaration*>(in));
     	break;
+    case AST_global::ID:
+    	pre_global_chain(dynamic_cast<AST_global*>(in));
+    	break;
     case AST_unset::ID:
     	pre_unset_chain(dynamic_cast<AST_unset*>(in));
     	break;
@@ -2647,8 +2655,8 @@ void AST_visitor::pre_statement_chain(AST_statement* in)
     case AST_goto::ID:
     	pre_goto_chain(dynamic_cast<AST_goto*>(in));
     	break;
-    case AST_hir_if::ID:
-    	pre_hir_if_chain(dynamic_cast<AST_hir_if*>(in));
+    case AST_branch::ID:
+    	pre_branch_chain(dynamic_cast<AST_branch*>(in));
     	break;
     }
 }
@@ -2736,6 +2744,19 @@ void AST_visitor::pre_expr_chain(AST_expr* in)
     }
 }
 
+void AST_visitor::pre_variable_name_chain(AST_variable_name* in)
+{
+    switch(in->classid())
+    {
+    case Token_variable_name::ID:
+    	pre_variable_name_chain(dynamic_cast<Token_variable_name*>(in));
+    	break;
+    case AST_reflection::ID:
+    	pre_reflection_chain(dynamic_cast<AST_reflection*>(in));
+    	break;
+    }
+}
+
 void AST_visitor::pre_list_element_chain(AST_list_element* in)
 {
     switch(in->classid())
@@ -2743,8 +2764,8 @@ void AST_visitor::pre_list_element_chain(AST_list_element* in)
     case AST_variable::ID:
     	pre_variable_chain(dynamic_cast<AST_variable*>(in));
     	break;
-    case AST_list_elements::ID:
-    	pre_list_elements_chain(dynamic_cast<AST_list_elements*>(in));
+    case AST_nested_list_elements::ID:
+    	pre_nested_list_elements_chain(dynamic_cast<AST_nested_list_elements*>(in));
     	break;
     }
 }
@@ -2835,19 +2856,6 @@ void AST_visitor::pre_target_chain(AST_target* in)
     }
 }
 
-void AST_visitor::pre_variable_name_chain(AST_variable_name* in)
-{
-    switch(in->classid())
-    {
-    case Token_variable_name::ID:
-    	pre_variable_name_chain(dynamic_cast<Token_variable_name*>(in));
-    	break;
-    case AST_reflection::ID:
-    	pre_reflection_chain(dynamic_cast<AST_reflection*>(in));
-    	break;
-    }
-}
-
 void AST_visitor::pre_method_name_chain(AST_method_name* in)
 {
     switch(in->classid())
@@ -2904,6 +2912,9 @@ void AST_visitor::post_statement_chain(AST_statement* in)
     case AST_static_declaration::ID:
     	post_static_declaration_chain(dynamic_cast<AST_static_declaration*>(in));
     	break;
+    case AST_global::ID:
+    	post_global_chain(dynamic_cast<AST_global*>(in));
+    	break;
     case AST_unset::ID:
     	post_unset_chain(dynamic_cast<AST_unset*>(in));
     	break;
@@ -2928,8 +2939,8 @@ void AST_visitor::post_statement_chain(AST_statement* in)
     case AST_goto::ID:
     	post_goto_chain(dynamic_cast<AST_goto*>(in));
     	break;
-    case AST_hir_if::ID:
-    	post_hir_if_chain(dynamic_cast<AST_hir_if*>(in));
+    case AST_branch::ID:
+    	post_branch_chain(dynamic_cast<AST_branch*>(in));
     	break;
     }
 }
@@ -3017,6 +3028,19 @@ void AST_visitor::post_expr_chain(AST_expr* in)
     }
 }
 
+void AST_visitor::post_variable_name_chain(AST_variable_name* in)
+{
+    switch(in->classid())
+    {
+    case Token_variable_name::ID:
+    	post_variable_name_chain(dynamic_cast<Token_variable_name*>(in));
+    	break;
+    case AST_reflection::ID:
+    	post_reflection_chain(dynamic_cast<AST_reflection*>(in));
+    	break;
+    }
+}
+
 void AST_visitor::post_list_element_chain(AST_list_element* in)
 {
     switch(in->classid())
@@ -3024,8 +3048,8 @@ void AST_visitor::post_list_element_chain(AST_list_element* in)
     case AST_variable::ID:
     	post_variable_chain(dynamic_cast<AST_variable*>(in));
     	break;
-    case AST_list_elements::ID:
-    	post_list_elements_chain(dynamic_cast<AST_list_elements*>(in));
+    case AST_nested_list_elements::ID:
+    	post_nested_list_elements_chain(dynamic_cast<AST_nested_list_elements*>(in));
     	break;
     }
 }
@@ -3116,19 +3140,6 @@ void AST_visitor::post_target_chain(AST_target* in)
     }
 }
 
-void AST_visitor::post_variable_name_chain(AST_variable_name* in)
-{
-    switch(in->classid())
-    {
-    case Token_variable_name::ID:
-    	post_variable_name_chain(dynamic_cast<Token_variable_name*>(in));
-    	break;
-    case AST_reflection::ID:
-    	post_reflection_chain(dynamic_cast<AST_reflection*>(in));
-    	break;
-    }
-}
-
 void AST_visitor::post_method_name_chain(AST_method_name* in)
 {
     switch(in->classid())
@@ -3185,6 +3196,9 @@ void AST_visitor::children_statement(AST_statement* in)
     case AST_static_declaration::ID:
     	children_static_declaration(dynamic_cast<AST_static_declaration*>(in));
     	break;
+    case AST_global::ID:
+    	children_global(dynamic_cast<AST_global*>(in));
+    	break;
     case AST_unset::ID:
     	children_unset(dynamic_cast<AST_unset*>(in));
     	break;
@@ -3209,8 +3223,8 @@ void AST_visitor::children_statement(AST_statement* in)
     case AST_goto::ID:
     	children_goto(dynamic_cast<AST_goto*>(in));
     	break;
-    case AST_hir_if::ID:
-    	children_hir_if(dynamic_cast<AST_hir_if*>(in));
+    case AST_branch::ID:
+    	children_branch(dynamic_cast<AST_branch*>(in));
     	break;
     }
 }
@@ -3298,6 +3312,19 @@ void AST_visitor::children_expr(AST_expr* in)
     }
 }
 
+void AST_visitor::children_variable_name(AST_variable_name* in)
+{
+    switch(in->classid())
+    {
+    case Token_variable_name::ID:
+    	children_variable_name(dynamic_cast<Token_variable_name*>(in));
+    	break;
+    case AST_reflection::ID:
+    	children_reflection(dynamic_cast<AST_reflection*>(in));
+    	break;
+    }
+}
+
 void AST_visitor::children_list_element(AST_list_element* in)
 {
     switch(in->classid())
@@ -3305,8 +3332,8 @@ void AST_visitor::children_list_element(AST_list_element* in)
     case AST_variable::ID:
     	children_variable(dynamic_cast<AST_variable*>(in));
     	break;
-    case AST_list_elements::ID:
-    	children_list_elements(dynamic_cast<AST_list_elements*>(in));
+    case AST_nested_list_elements::ID:
+    	children_nested_list_elements(dynamic_cast<AST_nested_list_elements*>(in));
     	break;
     }
 }
@@ -3393,19 +3420,6 @@ void AST_visitor::children_target(AST_target* in)
     	break;
     case Token_class_name::ID:
     	children_class_name(dynamic_cast<Token_class_name*>(in));
-    	break;
-    }
-}
-
-void AST_visitor::children_variable_name(AST_variable_name* in)
-{
-    switch(in->classid())
-    {
-    case Token_variable_name::ID:
-    	children_variable_name(dynamic_cast<Token_variable_name*>(in));
-    	break;
-    case AST_reflection::ID:
-    	children_reflection(dynamic_cast<AST_reflection*>(in));
     	break;
     }
 }
