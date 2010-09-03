@@ -261,7 +261,7 @@ string get_st_entry (Scope scope, string zvp, VARIABLE_NAME* var_name)
 		<< "if (" << name << " == NULL)\n"
 		<< "{\n"
 		<<		name << " = EG (uninitialized_zval_ptr);\n"
-		<<		name << "->refcount++;\n"
+		<<		"Z_ADDREF_P(" << name << ");\n"
 		<< "}\n"
 		<<	"zval** " << zvp << " = &" << name << ";\n";
 	}
@@ -526,7 +526,7 @@ void function_declaration_block(ostream& buf, Signature_list* methods, String* b
 		// TODO: pass by reference only works for PHP>5.1.0. Do we care?
 		buf 
 		<< "ZEND_BEGIN_ARG_INFO_EX(" << *block_name << "_" << *name << "_arg_info, 0, "
-		<< (s->is_ref ? "1" : "0")
+		<< (s->return_by_ref ? "1" : "0")
 		<< ", 0)\n"
 		;
 
@@ -626,8 +626,8 @@ void Generate_C::compile_static_value(string result, ostream& os, Static_value* 
 	// so that it does not get cleaned up with the rest of the temps
 	os 
 	<< result << " = local___static_value__;\n" 
-	<< "assert(!" << result << "->is_ref);\n" 
-	<< result << "->refcount++;\n";
+	<< "assert(!Z_ISREF_P(" << result << "));\n" 
+	<< "Z_ADDREF_P(" << result << ");\n";
 
 	// Clean up the temps again
 	foreach (string temp, gen_ann->var_names)
@@ -789,7 +789,7 @@ protected:
 		<<		"while (arg_count > 0)\n"
 		<<		"{\n"
 		<<		"	param_ptr = *(p-arg_count);\n"
-		<<		"	printf(\"addr = %08X, refcount = %d, is_ref = %d\\n\", (long)param_ptr, param_ptr->refcount, param_ptr->is_ref);\n"
+		<<		"	printf(\"addr = %08X, refcount = %d, is_ref = %d\\n\", (long)param_ptr, Z_REFCOUNT_P(param_ptr), Z_ISREF_P(param_ptr));\n"
 		<<		"	arg_count--;\n"
 		<<		"}\n"
 		<<		"printf(\"END ARGUMENT STACK\\n\");\n"
@@ -858,7 +858,7 @@ protected:
 			buf 
 			<< "// Add all parameters as local variables\n"
 			<< "{\n"
-			<< "int num_args = ZEND_NUM_ARGS ();\n"
+			<< "int num_args = MIN(ZEND_NUM_ARGS (), " << parameters->size() << ");\n"
 			<< "zval* params[" << parameters->size() << "];\n"
 			// First parameter to zend_get_parameters_array does not appear
 			// to be used (by looking at the source)
@@ -868,7 +868,7 @@ protected:
 			int index = 0;
 			foreach (Formal_parameter* param, *parameters)
 			{
-//				buf << "printf(\"refcount = %d, is_ref = %d\\n\", params[" << index << "]->refcount, params[" << index << "]->is_ref);\n";
+//				buf << "printf(\"refcount = %d, is_ref = %d\\n\", Z_REFCOUNT_P(params[" << index << "]), Z_ISREF_P(params[" << index << "]));\n";
 				buf << "// param " << index << "\n";
 
 				// if a default value is available, then create code to
@@ -886,14 +886,14 @@ protected:
 					gen->compile_static_value ("default_value", buf, param->var->default_value);
 
 					buf
-					<< "default_value->refcount--;\n"
+					<< "Z_DELREF_P(default_value);\n"
 					<<	"	params[" << index << "] = default_value;\n"
 					<< "}\n"
 					;
 				}
 
 				buf
-				<< "params[" << index << "]->refcount++;\n";
+				<< "Z_ADDREF_P(params[" << index << "]);\n";
 
 				// TODO this should be abstactable, but it work now, so
 				// leave it.
@@ -978,11 +978,11 @@ protected:
 		// return_by_reference. Note that we get the wrong answer if we do this
 		// before the destructors have run, since we can't tell how many
 		// destructors will affect it.
-		if (signature->is_ref)
+		if (signature->return_by_ref)
 		{
 			buf
 			<< "if (*return_value_ptr)\n"
-			<< "	saved_refcount = (*return_value_ptr)->refcount;\n"
+			<< "	saved_refcount = Z_REFCOUNT_P(*return_value_ptr);\n"
 			;
 		}
 
@@ -1328,7 +1328,7 @@ public:
 		buf
 		<< get_st_entry (LOCAL, "p_lhs", lhs->value)
 		<< "zval* value;\n"
-		<< "if ((*p_lhs)->is_ref)\n"
+		<< "if (Z_ISREF_P(*p_lhs))\n"
 		<< "{\n"
 		<< "  // Always overwrite the current value\n"
 		<< "  value = *p_lhs;\n"
@@ -1756,6 +1756,7 @@ public:
 				function_name = *name->value;
 
 				INST (buf, "method_invocation",
+						rhs->value,
 						s(function_name),
 						params,
 						rhs->value->get_filename (),
@@ -1787,6 +1788,7 @@ public:
 		}
 
 		INST (buf, "function_invocation",
+				rhs->value,
 				s(function_name),
 				params,
 				rhs->value->get_filename (),
@@ -2342,10 +2344,8 @@ class Pattern_method_alias : public Pattern
 
 	void generate_code(Generate_C* gen)
 	{
-		String alias_name = *alias->value->alias->value->clone();
-		alias_name.toLower();
-		String method_name = *alias->value->method_name->value->clone();
-		method_name.toLower();
+		String alias_name = *alias->value->alias->value->to_lower ();
+		String method_name = *alias->value->method_name->value->to_lower ();
 
 		buf
 		<<	"zend_function* existing;\n"
@@ -2402,11 +2402,8 @@ class Pattern_class_or_interface_alias : public Pattern
 		else
 			phc_unreachable ();
 
-		alias_name = alias_name->clone ();
-		alias_name->toLower();
-
-		aliased_name = aliased_name->clone ();
-		aliased_name->toLower();
+		alias_name = alias_name->to_lower ();
+		aliased_name = aliased_name->to_lower ();
 
 		buf
 		<<	"zend_class_entry* existing;\n"
@@ -2697,8 +2694,17 @@ void Generate_C::pre_php_script(PHP_script* in)
 
 		prologue
 		<< "static zend_fcall_info " << fci_name << ";\n"
-		<< "static zend_fcall_info_cache " << fcic_name << " = {0,NULL,NULL,NULL};\n"
+		<< "static zend_fcall_info_cache " << fcic_name << ";\n"
 		;
+
+    initializations
+    << "memset (&" << fci_name << ", 0, sizeof (zend_fcall_info));\n"
+    << "memset (&" << fcic_name << ", 0, sizeof (zend_fcall_info_cache));\n"
+    ;
+
+    finalizations
+    << "destroy_function_call (&" << fci_name << ");\n"
+    ;
 	}
 
 }
@@ -2799,7 +2805,7 @@ void Generate_C::post_php_script(PHP_script* in)
 		"   signal(SIGABRT, sighandler);\n"
 		"   signal(SIGSEGV, sighandler);\n"
 		"\n"
-		"   TSRMLS_D;\n"
+    "   TSRMLS_D;\n"
 		"   php_embed_init (argc, argv PTSRMLS_CC);\n"
 		"   zend_first_try\n"
 		"   {\n"

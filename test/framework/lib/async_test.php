@@ -442,7 +442,7 @@ abstract class AsyncTest extends Test
 	function run_program ($bundle)
 	{
 		$command = $bundle->get_command ();
-		$command = "ulimit -v 262144 && $command";
+		$command = "ulimit -v 262144 && ulimit -t 300 && $command";
 		global $opt_verbose;
 		if ($opt_verbose)
 			print "Running command: $command\n";
@@ -457,7 +457,7 @@ abstract class AsyncTest extends Test
 		if ($in)
 			$descriptorspec[0] = array ("pipe", "r");
 		$pipes = array();
-		$handle = proc_open ($command, $descriptorspec, &$pipes);
+		$handle = proc_open ($command, $descriptorspec, $pipes);
 		stream_set_blocking ($pipes[1], 0);
 		stream_set_blocking ($pipes[2], 0);
 		if ($in)
